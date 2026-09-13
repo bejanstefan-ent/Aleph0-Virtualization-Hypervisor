@@ -1,0 +1,7 @@
+[package]
+name = "aleph0hypervisor"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+uefi = { version = "0.40", features = ["panic_handler"] }

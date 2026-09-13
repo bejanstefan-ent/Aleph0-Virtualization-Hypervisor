@@ -48,17 +48,34 @@ pub enum VmxOnError {
     VmFailValid,
 }
 
+/// Decodes the RFLAGS value a VMX instruction leaves behind.
+///
+/// Every VMX instruction reports its outcome the same way: all flags clear on
+/// success, CF set for VMfailInvalid, ZF set for VMfailValid. Call this right
+/// after the `asm!` block instead of repeating the bit tests.
+pub fn check_rflags(rflags: u64) -> Result<(), VmxOnError> {
+    /// RFLAGS.CF, bit 0.
+    const CF: u64 = 1 << 0;
+    /// RFLAGS.ZF, bit 6.
+    const ZF: u64 = 1 << 6;
+
+    if rflags & CF != 0 {
+        Err(VmxOnError::VmFailInvalid)
+    } else if rflags & ZF != 0 {
+        Err(VmxOnError::VmFailValid)
+    } else {
+        Ok(())
+    }
+}
+
 impl VmxOnRegion {
     /// Allocates and zeroes one page through UEFI Boot Services.
     pub unsafe fn allocate() -> Result<Self, VmxOnError> {
-        let ptr = match uefi::boot::allocate_pages(
-            uefi::boot::AllocateType::AnyPages, 
-            MemoryType::LOADER_DATA, 
+         let ptr = uefi::boot::allocate_pages(
+            uefi::boot::AllocateType::AnyPages,
+            MemoryType::LOADER_DATA,
             1
-        ) {
-            Ok(ptr) => ptr,
-            Err(_) => return Err(VmxOnError::AllocationFailed)
-        };
+        ).map_err(|_| VmxOnError::AllocationFailed)?;
 
         unsafe {
             ptr.write_bytes(0, VMXON_REGION_SIZE);
@@ -111,22 +128,11 @@ pub unsafe fn vmxon(region: &VmxOnRegion) -> Result<(), VmxOnError> {
             "pushfq",
             "pop {1}",
             in(reg) region.phys_addr_ref(),
-            out(reg) rflags
+            lateout(reg) rflags
         );
     }
 
-    let zero_flag = (rflags & (1 << 6)) != 0;
-    let carry_flag = (rflags & (1 << 0)) != 0;
-
-    if carry_flag {
-        return Err(VmxOnError::VmFailInvalid);
-    }
-
-    if zero_flag {
-        return Err(VmxOnError::VmFailValid);
-    }
-
-    Ok(())
+    check_rflags(rflags)
 }
 
 /// The region must stay allocated for as long as the CPU is in VMX

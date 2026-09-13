@@ -18,6 +18,7 @@ pub mod cpuid;
 pub mod msr;
 pub mod cr;
 pub mod vmxon;
+pub mod vmcs;
 
 /// Overall VMX support/readiness state for the current CPU.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

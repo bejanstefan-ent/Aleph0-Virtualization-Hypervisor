@@ -41,5 +41,5 @@ fn main() -> Status {
         }
     };
 
-    loop {}
+    loop { }
 }

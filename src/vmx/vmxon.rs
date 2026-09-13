@@ -135,9 +135,9 @@ pub unsafe fn enter_vmx_root_operation() -> Result<VmxOnRegion, VmxOnError> {
     unsafe {
         cr::enable_vmxe();
         apply_fixed_bits();
-        let mut vmx_on_region = VmxOnRegion::allocate()?;
-        vmx_on_region.write_revision_id(vmcs_revision_id());
-        vmxon(&vmx_on_region)?;
-        Ok(vmx_on_region)
+        let mut vmxon_region = VmxOnRegion::allocate()?;
+        vmxon_region.write_revision_id(vmcs_revision_id());
+        vmxon(&vmxon_region)?;
+        Ok(vmxon_region)
     }
 }

@@ -18,11 +18,14 @@ fn main() -> Status {
 
     uefi::println!("{TAG} UEFI helpers initialized successfully.");
 
+    // Independent of VMX, so this runs and prints even under QEMU/TCG.
+    dump_segment_state();
+
     // Held until the loop below: the CPU keeps using both regions for as long
     // as it stays in VMX operation, so neither may be dropped before then.
     let _vmx_state = bring_up_vmx();
 
-    loop {}
+    loop { }
 }
 
 /// Detects VMX, enters root operation, then exercises the VMCS access path.
@@ -86,5 +89,33 @@ fn report_vmcs_error(error: VmcsError) {
         Err(e) => {
             uefi::println!("{TAG} VMCS self-test failed: VmFailValid, error unreadable ({e:?})");
         }
+    }
+}
+
+/// Prints the segmentation state that will go into the VMCS host fields.
+///
+/// TR is the one to watch: VM entry rejects a host TR selector of 0.
+fn dump_segment_state() {
+    let state = unsafe { vmx::segment::read_all() };
+
+    uefi::println!(
+        "{TAG} segments: cs={:#06x} ss={:#06x} ds={:#06x} es={:#06x} fs={:#06x} gs={:#06x} tr={:#06x}",
+        state.cs, state.ss, state.ds, state.es, state.fs, state.gs, state.tr,
+    );
+    uefi::println!(
+        "{TAG} bases:    fs={:#018x} gs={:#018x} tr={:#018x}",
+        state.fs_base, state.gs_base, state.tr_base,
+    );
+    uefi::println!(
+        "{TAG} gdtr:     base={:#018x} limit={:#06x}",
+        state.gdtr.base, state.gdtr.limit,
+    );
+    uefi::println!(
+        "{TAG} idtr:     base={:#018x} limit={:#06x}",
+        state.idtr.base, state.idtr.limit,
+    );
+
+    if state.tr == 0 {
+        uefi::println!("{TAG} WARNING: TR is 0; VM entry would reject this host state.");
     }
 }

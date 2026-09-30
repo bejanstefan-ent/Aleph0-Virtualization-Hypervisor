@@ -30,12 +30,13 @@
 //! that once a current VMCS exists, VMfailValid also stores a numeric reason
 //! readable via [`vm_instruction_error`].
 
-use uefi::boot::MemoryType;
 use core::arch::asm;
+use super::page::{allocate_zeroed_page, PAGE_SIZE};
 use super::vmxon::vmcs_revision_id;
 
 /// VMCS region size. Architecturally at most 4 KiB; one page is the norm.
 pub const VMCS_REGION_SIZE: usize = 4096;
+const _: () = assert!(VMCS_REGION_SIZE == PAGE_SIZE);
 
 // Encoding layout: bit 0 = access type (0 = full, 1 = high half of a 64-bit
 // field), bits 9:1 = index, bits 11:10 = type (0 control, 1 read-only data,
@@ -106,16 +107,8 @@ pub struct VmcsRegion {
 
 impl VmcsRegion {
     /// Allocates and zeroes one page through UEFI Boot Services.
-    pub unsafe fn allocate() -> Result<Self, VmcsError> {
-        let ptr = uefi::boot::allocate_pages(
-            uefi::boot::AllocateType::AnyPages,
-            MemoryType::LOADER_DATA,
-            1
-        ).map_err(|_| VmcsError::AllocationFailed)?;
-
-        unsafe {
-            ptr.write_bytes(0, VMCS_REGION_SIZE);
-        }
+    pub fn allocate() -> Result<Self, VmcsError> {
+        let ptr = allocate_zeroed_page(VmcsError::AllocationFailed)?;
 
         Ok(
             Self {
@@ -131,6 +124,10 @@ impl VmcsRegion {
     }
 
     /// Writes the VMCS revision identifier into the first four bytes.
+    ///
+    /// # Safety
+    ///
+    /// The region must not be in use as a VMCS when it is modified.
     pub unsafe fn write_revision_id(&mut self, revision_id: u32) {
         unsafe {
             (self.phys_addr as *mut u32).write_volatile(revision_id);

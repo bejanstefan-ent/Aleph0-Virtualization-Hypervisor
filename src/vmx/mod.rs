@@ -20,6 +20,8 @@ pub mod cr;
 pub mod vmxon;
 pub mod vmcs;
 pub mod segment;
+pub mod host_tables;
+pub mod page;
 
 /// Overall VMX support/readiness state for the current CPU.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,8 +43,8 @@ pub unsafe fn detect() -> VmxCapabilities {
     if !cpuid::is_vmx_supported() {
         return VmxCapabilities::NotSupportedByCpu;
     }
+    
     let result: VmxCapabilities;
-
     unsafe {
         if msr::feature_control_vmx_enabled() {
             result = VmxCapabilities::Supported;

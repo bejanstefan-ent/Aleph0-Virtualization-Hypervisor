@@ -23,13 +23,14 @@
 //! hypervisor is meant to survive `ExitBootServices`, this must become
 //! `RUNTIME_SERVICES_DATA` (or a reserved type) so the OS never reclaims it.
 
-use uefi::boot::MemoryType;
 use core::arch::asm;
 use super::cr;
 use super::msr;
+use super::page::{allocate_zeroed_page, PAGE_SIZE};
 
 /// VMXON region size. Architecturally at most 4 KiB; one page is the norm.
 pub const VMXON_REGION_SIZE: usize = 4096;
+const _: () = assert!(VMXON_REGION_SIZE == PAGE_SIZE);
 
 /// A 4 KiB, 4 KiB-aligned region handed to VMXON.
 pub struct VmxOnRegion {
@@ -42,6 +43,8 @@ pub struct VmxOnRegion {
 pub enum VmxOnError {
     /// UEFI could not provide a page.
     AllocationFailed,
+    /// IA32_VMX_BASIC reports a VMX region size outside the allocated page.
+    UnsupportedRegionSize,
     /// VMXON reported VmFailInvalid (CF=1).
     VmFailInvalid,
     /// VMXON reported VmFailValid (ZF=1): typically already in VMX operation.
@@ -70,16 +73,8 @@ pub fn check_rflags(rflags: u64) -> Result<(), VmxOnError> {
 
 impl VmxOnRegion {
     /// Allocates and zeroes one page through UEFI Boot Services.
-    pub unsafe fn allocate() -> Result<Self, VmxOnError> {
-         let ptr = uefi::boot::allocate_pages(
-            uefi::boot::AllocateType::AnyPages,
-            MemoryType::LOADER_DATA,
-            1
-        ).map_err(|_| VmxOnError::AllocationFailed)?;
-
-        unsafe {
-            ptr.write_bytes(0, VMXON_REGION_SIZE);
-        };
+    pub fn allocate() -> Result<Self, VmxOnError> {
+        let ptr = allocate_zeroed_page(VmxOnError::AllocationFailed)?;
 
         Ok(
             Self {
@@ -94,6 +89,10 @@ impl VmxOnRegion {
     }
 
     /// Writes the VMCS revision identifier into the first 4 bytes.
+    ///
+    /// # Safety
+    ///
+    /// The region must not be in use by VMXON when it is modified.
     pub unsafe fn write_revision_id(&mut self, revision_id: u32) {
         unsafe {
             (self.phys_addr as *mut u32).write_volatile(revision_id);
@@ -139,6 +138,11 @@ pub unsafe fn vmxon(region: &VmxOnRegion) -> Result<(), VmxOnError> {
 /// operation; dropping it while VMX is on is undefined behaviour.
 pub unsafe fn enter_vmx_root_operation() -> Result<VmxOnRegion, VmxOnError> {
     unsafe {
+        let region_size = (msr::rdmsr(msr::IA32_VMX_BASIC) >> 32) & 0x1fff;
+        if region_size == 0 || region_size > PAGE_SIZE as u64 {
+            return Err(VmxOnError::UnsupportedRegionSize);
+        }
+
         cr::enable_vmxe();
         apply_fixed_bits();
         let mut vmxon_region = VmxOnRegion::allocate()?;

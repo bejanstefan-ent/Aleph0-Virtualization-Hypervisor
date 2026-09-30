@@ -173,7 +173,7 @@ pub unsafe fn read_gs() -> u16 {
 /// Reads the Task Register selector, which points at the TSS descriptor.
 ///
 /// A zero value here is a problem: VM entry rejects a host TR selector of 0.
-/// UEFI firmware does set up a TSS, but it is worth printing to confirm.
+/// Firmware may leave TR unset, so check it before preparing VMCS host state.
 pub unsafe fn read_tr() -> u16 {
     let selector: u16;
     unsafe {
@@ -215,8 +215,8 @@ pub unsafe fn read_gs_base() -> u64 {
 ///
 /// # Safety
 ///
-/// `gdt` must describe a live GDT, and `selector` must index a descriptor
-/// inside it.
+/// `gdt` must describe a live, readable GDT through its reported limit.
+/// A selector outside that limit, or one referring to the LDT, returns zero.
 pub unsafe fn segment_base_from_gdt(
     gdt: &DescriptorTable,
     selector: u16,
@@ -228,9 +228,14 @@ pub unsafe fn segment_base_from_gdt(
         return 0;
     }
 
+    let offset = (index * 8) as usize;
+    if selector & 0x4 != 0 || offset + 12 > gdt.limit as usize + 1 {
+        return 0;
+    }
+
     // Each descriptor is 8 bytes, so this is where the descriptor lives —
     // not the base itself, which is stored inside it.
-    let descriptor = (gdt.base + index * 8) as *const u8;
+    let descriptor = (gdt.base + offset as u64) as *const u8;
 
     unsafe {
         let low = u16::from_le_bytes([

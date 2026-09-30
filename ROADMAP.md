@@ -25,12 +25,13 @@ There is no guest execution, VM-exit handler, EPT, or OS boot yet. VMCS constant
 
 ## 2. Prepare a minimal VMCS
 
-- [ ] Read VMX capability MSRs, including the true-control MSRs when supported. Compute pin-based, primary processor-based, VM-exit, and VM-entry controls from the allowed-0/allowed-1 masks; do not hard-code zero or arbitrary control values.
+- [ ] First, read `IA32_VMX_BASIC` and check bit 55. Read the true-control MSRs if available, otherwise the ordinary control MSRs, for pin-based, primary processor-based, VM-exit, and VM-entry controls. Print each MSR's low and high 32-bit halves. This only discovers the CPU's rules: do not write VMCS controls or launch a guest yet. Checkpoint: a Hyper-V boot prints all four values without faulting.
+- [ ] Next, derive legal values from those MSRs: the low halves specify bits that must be 1, and the high halves specify bits allowed to be 1. Reject requested features the CPU cannot enable; do not hard-code arbitrary control values. Write the four controls to the VMCS and read them back. A successful `VMWRITE`/`VMREAD` proves storage, not that VM entry will succeed.
 - [ ] Build a known, simple 64-bit guest context: controlled code and stack, valid CR0/CR3/CR4, segment selectors/bases/limits/access rights, GDTR/IDTR, RIP/RSP, RFLAGS bit 1 set, and a VMCS link pointer of all ones. Keep backing memory alive and accessible.
 - [ ] Fill required host fields using the actual root-mode state: selectors, CRs, FS/GS/TR bases, GDTR/IDTR bases, and a dedicated VM-exit stack and handler RIP. Check the host selectors and addresses against VM-entry rules.
 - [ ] Specify how UEFI memory and address translation are used before attempting entry. Initial experiments can use a controlled identity-mapped environment without EPT; that is not guest memory isolation.
 
-**Checkpoint:** Required VMCS fields are written and selected ones read back. An invalid-field `VMWRITE` is reported with the VM-instruction error code, rather than silently ignored.
+**Checkpoint:** After capability discovery, required VMCS fields are written and selected ones read back. An invalid-field `VMWRITE` is reported with the VM-instruction error code, rather than silently ignored. No `VMLAUNCH` yet.
 
 ## 3. Launch and observe one guest exit
 

@@ -10,6 +10,15 @@ pub const LOCK_BIT: u64 = 1 << 0;
 /// Bit 2: enable VMX outside SMX operation.
 pub const VMX_OUTSIDE_SMX_BIT: u64 = 1 << 2;
 
+/// SYSENTER's host code selector, stack pointer, and entry address.
+pub const IA32_SYSENTER_CS: u32 = 0x174;
+pub const IA32_SYSENTER_ESP: u32 = 0x175;
+pub const IA32_SYSENTER_EIP: u32 = 0x176;
+
+/// Page attribute table and extended feature enable register.
+pub const IA32_PAT: u32 = 0x277;
+pub const IA32_EFER: u32 = 0xC000_0080;
+
 pub unsafe fn read_feature_control() -> u64 {
     unsafe {
         rdmsr(IA32_FEATURE_CONTROL)
@@ -34,6 +43,62 @@ pub unsafe fn feature_control_vmx_enabled() -> bool {
 /// Bit 55: when set, the `IA32_VMX_TRUE_*_CTLS` MSRs exist and should be
 /// preferred over the non-TRUE variants when configuring the VMCS later.
 pub const IA32_VMX_BASIC: u32 = 0x480;
+
+pub const IA32_VMX_PINBASED_CTLS: u32 = 0x481;
+pub const IA32_VMX_PROCBASED_CTLS: u32 = 0x482;
+pub const IA32_VMX_EXIT_CTLS: u32 = 0x483;
+pub const IA32_VMX_ENTRY_CTLS: u32 = 0x484;
+pub const IA32_VMX_TRUE_PINBASED_CTLS: u32 = 0x48D;
+pub const IA32_VMX_TRUE_PROCBASED_CTLS: u32 = 0x48E;
+pub const IA32_VMX_TRUE_EXIT_CTLS: u32 = 0x48F;
+pub const IA32_VMX_TRUE_ENTRY_CTLS: u32 = 0x490;
+
+/// Raw VMX control capability MSRs, not the values currently in the VMCS.
+/// For each control MSR, the low 32 bits require control bits to be 1;
+/// the high 32 bits allow control bits to be 1. At the same bit position:
+/// (low, high) = (0, 0) means must be 0, (0, 1) means either value,
+/// and (1, 1) means must be 1. (1, 0) is inconsistent.
+/// `basic` has a different layout and is not a control-bit mask.
+#[derive(Debug, Clone, Copy)]
+pub struct VmcsControlMsrs {
+    pub basic: u64,
+    pub pinbased: u64,
+    pub primary: u64,
+    pub exit: u64,
+    pub entry: u64,
+}
+
+/// Read IA32_VMX_BASIC and the four control MSRs, selecting the true variants
+/// when BASIC bit 55 reports them. This does not write VMCS fields.
+///
+/// # Safety
+///
+/// The caller must first confirm CPU support for VMX before reading VMX MSRs.
+pub unsafe fn read_vmcs_control_msrs() -> VmcsControlMsrs {
+    unsafe {
+        let basic = rdmsr(IA32_VMX_BASIC);
+        let use_true_controls = basic & (1u64 << 55) != 0;
+        let (pin_id, primary_id, exit_id, entry_id) = if use_true_controls {
+            (IA32_VMX_TRUE_PINBASED_CTLS, IA32_VMX_TRUE_PROCBASED_CTLS,
+            IA32_VMX_TRUE_EXIT_CTLS, IA32_VMX_TRUE_ENTRY_CTLS)
+        } else {
+            (IA32_VMX_PINBASED_CTLS, IA32_VMX_PROCBASED_CTLS,
+            IA32_VMX_EXIT_CTLS, IA32_VMX_ENTRY_CTLS)
+        };
+        let pinbased = rdmsr(pin_id);
+        let primary = rdmsr(primary_id);
+        let exit = rdmsr(exit_id);
+        let entry = rdmsr(entry_id);
+
+        VmcsControlMsrs {
+            basic,
+            pinbased,
+            primary,
+            exit,
+            entry,
+        } 
+    }
+}
 
 /// Bits that must be 1 in CR0 while in VMX operation.
 pub const IA32_VMX_CR0_FIXED0: u32 = 0x486;

@@ -19,6 +19,7 @@ pub mod msr;
 pub mod cr;
 pub mod vmxon;
 pub mod vmcs;
+pub mod vmexit;
 pub mod segment;
 pub mod host_tables;
 pub mod page;

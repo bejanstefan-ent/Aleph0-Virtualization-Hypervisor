@@ -11,8 +11,11 @@ This is a learning-oriented Intel VT-x hypervisor booted as a UEFI application. 
 - [x] Allocate and load a VMCS; verify a `VMWRITE`/`VMREAD` round trip.
 - [x] Read and print current selectors, descriptor-table registers, and FS/GS/TR bases.
 - [x] Establish a usable host task register. The tested Hyper-V boot reported a nonzero `TR`; activation checks GDTR, TR, and the decoded TSS base against the prepared values.
+- [x] Discover VMX control MSRs, select legal control values, and write/read back the four VMCS control fields.
+- [x] Write/read back host selectors, CRs, segment/table bases, SYSENTER state, and `HOST_RSP`/`HOST_RIP`. The Hyper-V run reported host PAT and EFER load controls both false, so those conditional fields were skipped.
+- [x] Allocate a dedicated four-page VM-exit stack and compile an inactive entry stub that saves general-purpose registers and calls a non-returning Rust handler.
 
-There is no guest execution, VM-exit handler, EPT, or OS boot yet. VMCS constants for guest RIP/RSP, host RIP/RSP, and exit reason are defined but not yet used for entry.
+There is no guest execution, observed VM exit, EPT, or OS boot yet. The VM-exit handler currently spins; the stored host entry addresses have only been read back, not used by a VM exit. Guest RIP/RSP and exit-reason constants exist, but guest state and `VMLAUNCH` are not configured.
 
 ## 1. Establish a host TSS
 
@@ -25,19 +28,21 @@ There is no guest execution, VM-exit handler, EPT, or OS boot yet. VMCS constant
 
 ## 2. Prepare a minimal VMCS
 
-- [ ] First, read `IA32_VMX_BASIC` and check bit 55. Read the true-control MSRs if available, otherwise the ordinary control MSRs, for pin-based, primary processor-based, VM-exit, and VM-entry controls. Print each MSR's low and high 32-bit halves. This only discovers the CPU's rules: do not write VMCS controls or launch a guest yet. Checkpoint: a Hyper-V boot prints all four values without faulting.
-- [ ] Next, derive legal values from those MSRs: the low halves specify bits that must be 1, and the high halves specify bits allowed to be 1. Reject requested features the CPU cannot enable; do not hard-code arbitrary control values. Write the four controls to the VMCS and read them back. A successful `VMWRITE`/`VMREAD` proves storage, not that VM entry will succeed.
+- [x] Read `IA32_VMX_BASIC` and check bit 55. Read the true-control MSRs if available, otherwise the ordinary control MSRs, for pin-based, primary processor-based, VM-exit, and VM-entry controls. Print each MSR's low and high 32-bit halves. The Hyper-V boot printed all four values without faulting.
+- [x] Derive legal values from those MSRs: the low halves specify bits that must be 1, and the high halves specify bits allowed to be 1. Reject requested features the CPU cannot enable. Write the four controls to the VMCS and read them back. A successful `VMWRITE`/`VMREAD` proves storage, not that VM entry will succeed.
 - [ ] Build a known, simple 64-bit guest context: controlled code and stack, valid CR0/CR3/CR4, segment selectors/bases/limits/access rights, GDTR/IDTR, RIP/RSP, RFLAGS bit 1 set, and a VMCS link pointer of all ones. Keep backing memory alive and accessible.
-- [ ] Fill required host fields using the actual root-mode state: selectors, CRs, FS/GS/TR bases, GDTR/IDTR bases, and a dedicated VM-exit stack and handler RIP. Check the host selectors and addresses against VM-entry rules.
+- [x] Write/read back host fields from the current root-mode state: selectors, CRs, FS/GS/TR and GDTR/IDTR bases, SYSENTER MSRs, and the dedicated VM-exit stack top and stub address. Load host PAT/EFER fields only if the selected exit controls require them.
+- [ ] Complete VM-entry validation of host selectors, CRs, and addresses; write/readback alone does not prove the host state will pass VM-entry checks.
 - [ ] Specify how UEFI memory and address translation are used before attempting entry. Initial experiments can use a controlled identity-mapped environment without EPT; that is not guest memory isolation.
 
-**Checkpoint:** After capability discovery, required VMCS fields are written and selected ones read back. An invalid-field `VMWRITE` is reported with the VM-instruction error code, rather than silently ignored. No `VMLAUNCH` yet.
+**Checkpoint:** Hyper-V reported successful control, host-state, SYSENTER, and `HOST_RSP`/`HOST_RIP` write/readback. Both host PAT and EFER load controls were false, so those conditional writes were not exercised. Guest fields and VM-entry validation remain; no `VMLAUNCH` yet.
 
 ## 3. Launch and observe one guest exit
 
+- [x] Assemble and link an inactive VM-exit entry stub that saves guest general-purpose registers, prepares the UEFI x64 call frame, and calls a non-returning handler. Do not mistake compilation or `HOST_RIP` readback for a tested exit.
+- [ ] Make the first exit observable: read `VM_EXIT_REASON` and record it through a controlled diagnostic/failure path, without assuming a UEFI print is safe in the exit handler.
 - [ ] Execute `VMLAUNCH` into a tiny guest that deliberately executes `VMCALL`.
 - [ ] On instruction failure, distinguish VMfailInvalid, VMfailValid (read `VM_INSTRUCTION_ERROR`), and VM-entry failure reported as a VM exit. Do not treat every return as a successful guest run.
-- [ ] In a VM-exit entry stub, preserve guest general-purpose registers before using Rust code. Read `VM_EXIT_REASON` and record the result; use a known-good host stack.
 - [ ] Handle only the expected `VMCALL` at first. Define a controlled stopping/return path; do not blindly `VMRESUME` at the same guest RIP.
 
 **Checkpoint:** A Hyper-V run confirms that the guest executed and records the expected `VMCALL` exit reason, not merely a successful VMCS write.
@@ -59,8 +64,8 @@ There is no guest execution, VM-exit handler, EPT, or OS boot yet. VMCS constant
 
 ## How to verify each milestone
 
-- Run `cargo build` after each change. It checks compilation, not VM-entry validity.
+- Run `cargo build --target x86_64-unknown-uefi` after each change. It checks compilation, not VM-entry validity.
 - Run `run-hyperv.ps1` from an elevated PowerShell session and inspect the VM console. The runner turns off the named test VM and recreates its ESP VHDX; do not keep irreplaceable data there.
 - Record observed VMX instruction errors and VM-exit reasons as milestones are reached. QEMU without nested VMX can still test non-VMX diagnostics, but cannot validate `VMLAUNCH`.
 
-Relevant code: `src/main.rs`, `src/vmx/segment.rs`, `src/vmx/vmxon.rs`, `src/vmx/vmcs.rs`, and `run-hyperv.ps1`.
+Relevant code: `src/main.rs`, `src/vmx/segment.rs`, `src/vmx/vmxon.rs`, `src/vmx/vmcs.rs`, `src/vmx/vmexit.rs`, and `run-hyperv.ps1`.

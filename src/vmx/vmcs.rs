@@ -31,6 +31,9 @@
 //! readable via [`vm_instruction_error`].
 
 use core::arch::asm;
+use crate::vmx::msr::{self, VmcsControlMsrs};
+use crate::vmx::{cr, segment};
+
 use super::page::{allocate_zeroed_page, PAGE_SIZE};
 use super::vmxon::vmcs_revision_id;
 
@@ -43,6 +46,42 @@ const _: () = assert!(VMCS_REGION_SIZE == PAGE_SIZE);
 // 2 guest state, 3 host state), bits 14:13 = width (0 = 16-bit, 1 = 64-bit,
 // 2 = 32-bit, 3 = natural).
 
+/// Pin-based VM-execution controls (32-bit VMCS field).
+pub const PIN_BASED_VM_EXEC_CONTROL: u32 = 0x4000;
+/// Primary processor-based VM-execution controls (32-bit VMCS field).
+pub const PRIMARY_VM_EXEC_CONTROL: u32 = 0x4002;
+/// VM-exit controls (32-bit VMCS field).
+pub const VM_EXIT_CONTROLS: u32 = 0x400C;
+/// VM-exit control bits that load host PAT and EFER from the VMCS.
+pub const VM_EXIT_LOAD_IA32_PAT: u64 = 1 << 19;
+pub const VM_EXIT_LOAD_IA32_EFER: u64 = 1 << 21;
+/// VM-entry controls (32-bit VMCS field).
+pub const VM_ENTRY_CONTROLS: u32 = 0x4012;
+
+const HOST_ADDRESS_SPACE_SIZE: u32 = 1 << 9;
+const IA32E_GUEST_MODE: u32 = 1 << 9;
+
+/// Requested control bits; CPU-required bits are added by `configure_controls`.
+#[derive(Debug, Clone, Copy)]
+pub struct DesiredControls {
+    pub pin: u32,
+    pub primary: u32,
+    pub exit: u32,
+    pub entry: u32,
+}
+
+impl DesiredControls {
+    /// Minimal requests for a 64-bit guest on this 64-bit host.
+    pub const fn minimal_64_bit_guest() -> Self {
+        Self {
+            pin: 0,
+            primary: 0,
+            exit: HOST_ADDRESS_SPACE_SIZE,
+            entry: IA32E_GUEST_MODE,
+        }
+    }
+}
+
 /// Read-only: why the last VMX instruction failed (valid after VMfailValid).
 pub const VM_INSTRUCTION_ERROR: u32 = 0x4400;
 /// Read-only: why the last VM exit happened.
@@ -54,6 +93,38 @@ pub const GUEST_RSP: u32 = 0x681C;
 pub const GUEST_RIP: u32 = 0x681E;
 /// Guest RFLAGS (natural width).
 pub const GUEST_RFLAGS: u32 = 0x6820;
+
+/// Host segment selectors (16-bit VMCS fields).
+pub const HOST_ES_SELECTOR: u32 = 0x0C00;
+pub const HOST_CS_SELECTOR: u32 = 0x0C02;
+pub const HOST_SS_SELECTOR: u32 = 0x0C04;
+pub const HOST_DS_SELECTOR: u32 = 0x0C06;
+pub const HOST_FS_SELECTOR: u32 = 0x0C08;
+pub const HOST_GS_SELECTOR: u32 = 0x0C0A;
+pub const HOST_TR_SELECTOR: u32 = 0x0C0C;
+
+/// Host PAT and EFER (64-bit VMCS fields, loaded when selected on VM exit).
+pub const HOST_IA32_PAT: u32 = 0x2C00;
+pub const HOST_IA32_EFER: u32 = 0x2C02;
+
+/// Host SYSENTER code selector (32-bit VMCS field).
+pub const HOST_IA32_SYSENTER_CS: u32 = 0x4C00;
+
+/// Host control registers (natural-width VMCS fields).
+pub const HOST_CR0: u32 = 0x6C00;
+pub const HOST_CR3: u32 = 0x6C02;
+pub const HOST_CR4: u32 = 0x6C04;
+
+/// Host segment and descriptor-table bases (natural-width VMCS fields).
+pub const HOST_FS_BASE: u32 = 0x6C06;
+pub const HOST_GS_BASE: u32 = 0x6C08;
+pub const HOST_TR_BASE: u32 = 0x6C0A;
+pub const HOST_GDTR_BASE: u32 = 0x6C0C;
+pub const HOST_IDTR_BASE: u32 = 0x6C0E;
+
+/// Host SYSENTER stack and entry addresses (natural-width VMCS fields).
+pub const HOST_IA32_SYSENTER_ESP: u32 = 0x6C10;
+pub const HOST_IA32_SYSENTER_EIP: u32 = 0x6C12;
 
 /// Host RSP: the stack the CPU switches to on every VM exit.
 pub const HOST_RSP: u32 = 0x6C14;
@@ -77,6 +148,12 @@ pub enum VmcsError {
     /// [`self_test`] read back something other than what it wrote. Both
     /// instructions reported success, so this is not a VMX failure.
     SelfTestMismatch,
+    /// The requested control value is not supported by the processor.
+    UnsupportedControlValue,
+    /// A control field read back differently from the value written to it.
+    ControlReadbackMismatch,
+    /// Host state validation failed.
+    HostStateValidation,
 }
 
 /// Decodes the RFLAGS value a VMX instruction leaves behind.
@@ -217,6 +294,161 @@ pub unsafe fn vmwrite(field_encoding: u32, value: u64) -> Result<(), VmcsError> 
     }
 
     check_rflags(rflags)
+}
+
+/// Derive legal pin, primary, exit, and entry controls from the CPU masks,
+/// write them to the current VMCS, and verify each field by reading it back.
+/// Always request 64-bit host mode on VM exit, regardless of `desired.exit`.
+///
+/// # Safety
+///
+/// VMX operation must be active and a VMCS must be current on this CPU.
+pub unsafe fn configure_controls(capabilities: &VmcsControlMsrs, desired: DesiredControls) -> Result<(), VmcsError> {
+    let pin = choose_control(capabilities.pinbased, desired.pin)?;
+    let primary = choose_control(capabilities.primary, desired.primary)?;
+    let exit = choose_control(capabilities.exit, desired.exit | HOST_ADDRESS_SPACE_SIZE)?;
+    let entry = choose_control(capabilities.entry, desired.entry)?;
+
+    unsafe {
+        vmwrite(PIN_BASED_VM_EXEC_CONTROL, pin.into())?;
+        vmwrite(PRIMARY_VM_EXEC_CONTROL, primary.into())?;
+        vmwrite(VM_EXIT_CONTROLS, exit.into())?;
+        vmwrite(VM_ENTRY_CONTROLS, entry.into())?;
+
+        // Verify by reading back
+        if vmread(PIN_BASED_VM_EXEC_CONTROL)? != pin as u64 {
+            return Err(VmcsError::ControlReadbackMismatch);
+        }
+        if vmread(PRIMARY_VM_EXEC_CONTROL)? != primary as u64 {
+            return Err(VmcsError::ControlReadbackMismatch);
+        }
+        if vmread(VM_EXIT_CONTROLS)? != exit as u64 {
+            return Err(VmcsError::ControlReadbackMismatch);
+        }
+        if vmread(VM_ENTRY_CONTROLS)? != entry as u64 {
+            return Err(VmcsError::ControlReadbackMismatch);
+        }
+    }
+
+    Ok(())
+}
+
+/// Capture the active host state and write it to the current VMCS.
+/// Do not use this as evidence that VM entry is ready until all host fields
+/// required by the selected VM-exit controls have been populated.
+///
+/// # Safety
+///
+/// VMX operation must be active, a VMCS must be current on this CPU, and the
+/// host GDT and TSS must already be active and remain valid on VM exit.
+pub unsafe fn configure_host_state() -> Result<(), VmcsError> {
+    // a. Read segment::read_all() and cr::read_cr0/cr3/cr4 after GDT/TSS activation.
+    // b. Check the host selectors' VM-entry constraints before writing them.
+    // c. Pair each HOST_* selector, CR, and base encoding with its live value;
+    //    use vmwrite and vmread to verify every pair, as configure_controls does.
+    // d. Load host PAT/EFER only when selected VM-exit controls require them.
+    // e. Configure HOST_RSP/HOST_RIP separately with configure_host_entry; do not launch.
+    let segments = unsafe { segment::read_all() };
+    let cr0 = unsafe { cr::read_cr0() };
+    let cr3 = unsafe { cr::read_cr3() };
+    let cr4 = unsafe { cr::read_cr4() };
+    let sysenter_cs = u64::from(unsafe { msr::rdmsr(msr::IA32_SYSENTER_CS) } as u32);
+    let sysenter_esp = unsafe { msr::rdmsr(msr::IA32_SYSENTER_ESP) };
+    let sysenter_eip = unsafe { msr::rdmsr(msr::IA32_SYSENTER_EIP) };
+
+    {
+
+        let selectors = [
+            segments.es, segments.cs, segments.ss, segments.ds,
+            segments.fs, segments.gs, segments.tr,
+        ];
+
+        if selectors.iter().any(|selector| selector & 0b111 != 0) {
+            return Err(VmcsError::HostStateValidation);
+        }
+    }
+
+    if segments.cs == 0 || segments.tr == 0 {
+        return Err(VmcsError::HostStateValidation);
+    }
+    let exit_controls = unsafe { vmread(VM_EXIT_CONTROLS)? };
+    
+    unsafe {
+        write_host_state(HOST_ES_SELECTOR, segments.es as u64)?;
+        write_host_state(HOST_CS_SELECTOR, segments.cs as u64)?;
+        write_host_state(HOST_SS_SELECTOR, segments.ss as u64)?;
+        write_host_state(HOST_DS_SELECTOR, segments.ds as u64)?;
+        write_host_state(HOST_FS_SELECTOR, segments.fs as u64)?;
+        write_host_state(HOST_GS_SELECTOR, segments.gs as u64)?;
+        write_host_state(HOST_TR_SELECTOR, segments.tr as u64)?;
+
+        write_host_state(HOST_CR0, cr0)?;
+        write_host_state(HOST_CR3, cr3)?;
+        write_host_state(HOST_CR4, cr4)?;
+
+        write_host_state(HOST_FS_BASE, segments.fs_base)?;
+        write_host_state(HOST_GS_BASE, segments.gs_base)?;
+        write_host_state(HOST_TR_BASE, segments.tr_base)?;
+        write_host_state(HOST_GDTR_BASE, segments.gdtr.base)?;
+        write_host_state(HOST_IDTR_BASE, segments.idtr.base)?;
+
+        write_host_state(HOST_IA32_SYSENTER_CS, sysenter_cs)?;
+        write_host_state(HOST_IA32_SYSENTER_ESP, sysenter_esp)?;
+        write_host_state(HOST_IA32_SYSENTER_EIP, sysenter_eip)?;
+
+        if exit_controls & VM_EXIT_LOAD_IA32_PAT != 0 {
+            write_host_state(HOST_IA32_PAT, msr::rdmsr(msr::IA32_PAT))?;
+        }
+        if exit_controls & VM_EXIT_LOAD_IA32_EFER != 0 {
+            write_host_state(HOST_IA32_EFER, msr::rdmsr(msr::IA32_EFER))?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Store the host stack top and VM-exit entry address without entering a guest.
+///
+/// # Safety
+///
+/// VMX operation must be active and a VMCS current on this CPU. The stack
+/// and entry code must remain mapped and valid whenever a VM exit can occur.
+pub unsafe fn configure_host_entry(stack_top: u64, entry_address: u64) -> Result<(), VmcsError> {
+    if stack_top == 0 || stack_top & 15 != 0 || entry_address == 0 {
+        return Err(VmcsError::HostStateValidation);
+    }
+
+    unsafe {
+        write_host_state(HOST_RSP, stack_top)?;
+        write_host_state(HOST_RIP, entry_address)?;
+    }
+    Ok(())
+}
+
+/// Write a host state field and verify it by reading it back.
+unsafe fn write_host_state(field_encoding: u32, value: u64) -> Result<(), VmcsError> {
+    unsafe {
+        vmwrite(field_encoding, value)?;
+        let read_back = vmread(field_encoding)?;
+        if read_back != value {
+            return Err(VmcsError::HostStateValidation);
+        }
+        Ok(())
+    }
+}
+
+/// Choose a 32-bit VMCS control value using one raw capability MSR.
+/// The low half forces bits to 1; the high half permits bits to be 1.
+/// Reject an inconsistent mask or a requested bit the CPU cannot enable.
+fn choose_control(capability: u64, desired: u32) -> Result<u32, VmcsError> {
+    let required = capability as u32;
+    let allowed = (capability >> 32) as u32;
+    if required & !allowed != 0 || desired & !allowed != 0 {
+        return Err(VmcsError::UnsupportedControlValue);
+    }
+
+    // Add mandatory bits without changing any other requested bits.
+    Ok(desired | required)
 }
 
 /// The numeric reason the last VMX instruction failed.

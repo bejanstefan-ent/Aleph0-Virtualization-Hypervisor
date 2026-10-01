@@ -1,4 +1,10 @@
-//! Control register access needed for VMX.
+//! Access to the x86 control registers (CRx) needed for VMX host state.
+//!
+//! CR0 controls basic execution modes, including protected mode and paging.
+//! CR3 selects the current page-table root (and can carry PCID information).
+//! CR4 enables additional CPU features, including VMX through CR4.VMXE.
+//! On VM exit, the CPU loads host CR0, CR3, and CR4 from the VMCS, so those
+//! fields must describe the environment the host handler will run in.
 use core::arch::asm;
 
 /// CR4 bit 13: VMX-enable. VMXON raises #UD while this is clear.
@@ -24,6 +30,32 @@ pub unsafe fn write_cr0(value: u64) {
     unsafe {
         asm!(
             "mov cr0, {}",
+            in(reg) value,
+            options(nostack, preserves_flags),
+        );
+    }
+}
+
+/// Reads CR3.
+pub unsafe fn read_cr3() -> u64 {
+    let value: u64;
+
+    unsafe {
+        asm!(
+            "mov {}, cr3",
+            out(reg) value,
+            options(nomem, nostack, preserves_flags),
+        );
+    }
+    
+    value
+}
+
+/// Writes CR3.
+pub unsafe fn write_cr3(value: u64) {
+    unsafe {
+        asm!(
+            "mov cr3, {}",
             in(reg) value,
             options(nostack, preserves_flags),
         );

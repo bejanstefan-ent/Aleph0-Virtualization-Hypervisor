@@ -30,20 +30,23 @@ There is no guest execution, observed VM exit, EPT, or OS boot yet. The VM-exit 
 
 - [x] Read `IA32_VMX_BASIC` and check bit 55. Read the true-control MSRs if available, otherwise the ordinary control MSRs, for pin-based, primary processor-based, VM-exit, and VM-entry controls. Print each MSR's low and high 32-bit halves. The Hyper-V boot printed all four values without faulting.
 - [x] Derive legal values from those MSRs: the low halves specify bits that must be 1, and the high halves specify bits allowed to be 1. Reject requested features the CPU cannot enable. Write the four controls to the VMCS and read them back. A successful `VMWRITE`/`VMREAD` proves storage, not that VM entry will succeed.
-- [ ] Build a known, simple 64-bit guest context: controlled code and stack, valid CR0/CR3/CR4, segment selectors/bases/limits/access rights, GDTR/IDTR, RIP/RSP, RFLAGS bit 1 set, and a VMCS link pointer of all ones. Keep backing memory alive and accessible.
+- [ ] Add a guest-memory owner (for example, `src/vmx/guest.rs`) that allocates and retains separate guest code and guest stack pages. Start with tiny guest code whose first test instruction is `VMCALL`; keep both pages alive for the entire VMX experiment.
+- [ ] Decide and verify guest address translation before using those pages. With EPT disabled, guest virtual addresses translate through guest CR3; confirm the code page is executable and the separate stack page is writable under those page tables. Do not assume a UEFI allocation address is automatically usable by the guest.
+- [ ] Build a known, simple 64-bit guest context: valid CR0/CR3/CR4, segment selectors/bases/limits/access rights, GDTR/IDTR, RIP pointing at the guest code, RSP pointing at the guest stack, RFLAGS bit 1 set, and a VMCS link pointer of all ones. Initialize all other guest fields required by the selected controls and retain their backing memory.
+- [ ] Add a guest-state writer and read back the fields it writes. This checks VMCS storage only; the CPU's VM-entry checks happen when entry is attempted.
 - [x] Write/read back host fields from the current root-mode state: selectors, CRs, FS/GS/TR and GDTR/IDTR bases, SYSENTER MSRs, and the dedicated VM-exit stack top and stub address. Load host PAT/EFER fields only if the selected exit controls require them.
 - [ ] Complete VM-entry validation of host selectors, CRs, and addresses; write/readback alone does not prove the host state will pass VM-entry checks.
-- [ ] Specify how UEFI memory and address translation are used before attempting entry. Initial experiments can use a controlled identity-mapped environment without EPT; that is not guest memory isolation.
+- [ ] Document the UEFI memory and address-translation assumptions for this experiment. A shared/identity-mapped address space without EPT is only a learning setup, not guest memory isolation.
 
-**Checkpoint:** Hyper-V reported successful control, host-state, SYSENTER, and `HOST_RSP`/`HOST_RIP` write/readback. Both host PAT and EFER load controls were false, so those conditional writes were not exercised. Guest fields and VM-entry validation remain; no `VMLAUNCH` yet.
+**Checkpoint:** Hyper-V reported successful control, host-state, SYSENTER, and `HOST_RSP`/`HOST_RIP` write/readback. Both host PAT and EFER load controls were false, so those conditional writes were not exercised. Guest memory, guest fields, and VM-entry validation remain; no `VMLAUNCH` yet.
 
 ## 3. Launch and observe one guest exit
 
 - [x] Assemble and link an inactive VM-exit entry stub that saves guest general-purpose registers, prepares the UEFI x64 call frame, and calls a non-returning handler. Do not mistake compilation or `HOST_RIP` readback for a tested exit.
-- [ ] Make the first exit observable: read `VM_EXIT_REASON` and record it through a controlled diagnostic/failure path, without assuming a UEFI print is safe in the exit handler.
-- [ ] Execute `VMLAUNCH` into a tiny guest that deliberately executes `VMCALL`.
+- [ ] Replace the spin-only handler with a deliberate first-exit diagnostic: read `VM_EXIT_REASON`, record it through a mechanism that can be observed, and stop safely. Do not assume UEFI printing is safe in the low-level exit handler; there is no `VMRESUME` path yet.
+- [ ] After guest memory/state readback and the observable exit path are ready, execute `VMLAUNCH` to enter the tiny guest. `VMLAUNCH` enters the guest for the first time; the guest then executes `VMCALL`, which causes the VM exit.
 - [ ] On instruction failure, distinguish VMfailInvalid, VMfailValid (read `VM_INSTRUCTION_ERROR`), and VM-entry failure reported as a VM exit. Do not treat every return as a successful guest run.
-- [ ] Handle only the expected `VMCALL` at first. Define a controlled stopping/return path; do not blindly `VMRESUME` at the same guest RIP.
+- [ ] Handle only the expected `VMCALL` at first. Define a controlled stop/observation path; do not blindly `VMRESUME` at the same guest RIP.
 
 **Checkpoint:** A Hyper-V run confirms that the guest executed and records the expected `VMCALL` exit reason, not merely a successful VMCS write.
 

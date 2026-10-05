@@ -30,6 +30,41 @@ There is no guest execution, observed VM exit, EPT, or OS boot yet. The VM-exit 
 
 **Checkpoint:** A Hyper-V run produces a `run\serial.log` that matches the VM console. Only then rely on serial as the observation path for the first VM exit.
 
+### 0b. Output in exit context and after `ExitBootServices`
+
+After `ExitBootServices` the OS runs as Aleph0's guest, Aleph0 only runs during VM exits, and serial is its only output. Facts this plan is based on:
+
+- `uefi::println!` (uefi 0.40, `helpers/println.rs`) checks `boot::are_boot_services_active()`. After `ExitBootServices` it silently prints nothing. Before it, the check passes, so a call from the VM-exit handler **would** call the firmware console.
+- The `uefi` crate's panic handler (`panic_handler` feature) calls that `println!`, then `boot::stall` and `runtime::reset`: three firmware calls. A panic in the exit handler therefore enters firmware from exit context, and after `ExitBootServices` the panic message is lost.
+- The OS will want COM1 too: Linux probes `ttyS0`, including its own loopback test, and Windows may use COM1 for debugging. Unarbitrated sharing loses or interleaves output.
+- Under Hyper-V every serial byte is itself a VM exit to Hyper-V, so printing on every guest exit slows the guest dramatically.
+
+Before the first `VMLAUNCH` (section 3):
+
+- [ ] Replace the `uefi` panic handler with Aleph0's own and drop the crate's `panic_handler` feature. Always print the panic over serial, print on the console only in ordinary boot-services context, then halt with `cli; hlt`. No `stall`, no `runtime::reset`, no other firmware calls.
+- [ ] Track the output phase in one global (boot services, inside the VM-exit handler, runtime after `ExitBootServices`). `log!` writes to the console only in the boot-services phase and to serial in every phase.
+
+At the `ExitBootServices` milestone (section 5):
+
+- [ ] Make the serial port base a parameter instead of the fixed `COM1`. Send hypervisor output to COM2 (`0x2F8`) and leave COM1 to the guest OS, without interception at first. In `run-hyperv.ps1`, attach COM2 to `\\.\pipe\aleph0-com2` and point `read-serial.ps1` at it.
+- [ ] Switch the phase to runtime immediately after `ExitBootServices`. Ideally make the console unreachable from runtime code, so a mistake fails to compile rather than silently printing nothing.
+- [ ] Keep the logging code and its state (`serial.rs` statics such as `READY`) in memory the OS will not reclaim. This is part of the persistence item in section 5, not a separate mechanism.
+
+At multiple vCPUs (section 5):
+
+- [ ] Serialize output per line, not per byte, with a spinlock, and prefix each line with the CPU number (`[cpu2] VM exit: ...`). Never hold the lock across `VMRESUME`. The panic path uses a try-lock and writes anyway if the lock is held, so an NMI or a panic cannot deadlock on it.
+
+When guest exits become frequent (OS guest):
+
+- [ ] Add log levels (error, warn, info, trace; trace off by default) and rate-limit repeated messages, for example "CPUID exit x1000".
+- [ ] Optionally keep an in-memory ring buffer of recent events and send it over serial only on panic or when a guest tool asks for it with `VMCALL`.
+
+At the virtual-device milestone (section 5):
+
+- [ ] Intercept COM1 with I/O bitmaps (exit reason 30). Either hide it (reads return `0xFF`, writes ignored) or emulate a 16550 for the guest and forward its output tagged `[guest]`. See [docs/PORT_IO.md](docs/PORT_IO.md), section 7.
+
+**Checkpoint:** A deliberate panic inside the VM-exit handler prints its message over serial and halts without any firmware call. After `ExitBootServices`, hypervisor lines arrive on COM2 while the guest OS uses COM1 undisturbed.
+
 ## 1. Establish a host TSS
 
 - [x] Allocate a long-lived 64-bit TSS and a GDT that preserves the descriptors used by the current CS/SS and other active selectors; append a present 16-byte, 64-bit available-TSS descriptor.
@@ -57,6 +92,7 @@ There is no guest execution, observed VM exit, EPT, or OS boot yet. The VM-exit 
 
 - [x] Assemble and link an inactive VM-exit entry stub that saves guest general-purpose registers, prepares the UEFI x64 call frame, and calls a non-returning handler. Do not mistake compilation or `HOST_RIP` readback for a tested exit.
 - [x] Replace the spin-only handler with a deliberate first-exit diagnostic: read `VM_EXIT_REASON`, record it through a mechanism that can be observed, and stop safely. Do not assume UEFI printing is safe in the low-level exit handler; there is no `VMRESUME` path yet. `vmexit_handler` reads the exit reason (basic reason plus the VM-entry-failure bit), exit qualification, guest RIP, instruction length and the saved guest RAX-RDX, prints them with `serial_println!`, and halts with `cli; hlt`. Written and compiled only; it runs for the first time after `VMLAUNCH`.
+- [ ] Before the first launch, finish the "Before the first `VMLAUNCH`" items in section 0b (own panic handler, output phase), so a panic in exit context never calls firmware.
 - [ ] After guest memory/state readback and the observable exit path are ready, execute `VMLAUNCH` to enter the tiny guest. `VMLAUNCH` enters the guest for the first time; the guest then executes `VMCALL`, which causes the VM exit.
 - [ ] On instruction failure, distinguish VMfailInvalid, VMfailValid (read `VM_INSTRUCTION_ERROR`), and VM-entry failure reported as a VM exit. Do not treat every return as a successful guest run.
 - [ ] Handle only the expected `VMCALL` at first. Define a controlled stop/observation path; do not blindly `VMRESUME` at the same guest RIP.
@@ -75,8 +111,8 @@ There is no guest execution, observed VM exit, EPT, or OS boot yet. The VM-exit 
 
 - [ ] Check CPU support for secondary execution controls and EPT; allocate and validate EPT tables before enabling them. Verify allowed guest physical accesses and an intentional EPT-violation exit.
 - [ ] Add only the necessary exits first (for example CPUID and I/O), then define the virtual devices needed by a larger guest.
-- [ ] Decide how the hypervisor will own memory and persist after `ExitBootServices`. Loader-data pages and UEFI identity mapping are only assumptions for the current boot-services experiment.
-- [ ] Expand to multiple vCPUs, scheduling, and an OS guest only after the single-vCPU lifecycle is reliable.
+- [ ] Decide how the hypervisor will own memory and persist after `ExitBootServices`. Loader-data pages and UEFI identity mapping are only assumptions for the current boot-services experiment. After `ExitBootServices` the OS may reuse all `LOADER_CODE` (the `.efi` image, including its statics), `LOADER_DATA` (every page from `page.rs`) and `BOOT_SERVICES_DATA`. That last one holds the firmware page tables that `HOST_CR3` currently points at, so Aleph0 needs its own host page tables, not only a different memory type. Output changes for this milestone are in section 0b.
+- [ ] Expand to multiple vCPUs, scheduling, and an OS guest only after the single-vCPU lifecycle is reliable. Per-line output locking and CPU-numbered log lines are in section 0b.
 
 ## How to verify each milestone
 

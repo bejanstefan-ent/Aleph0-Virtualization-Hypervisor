@@ -2,17 +2,78 @@
 #![no_std]
 
 use uefi::prelude::*;
-use vmx::host_tables::TssRegion;
 
 mod vmx;
 use vmx::VmxCapabilities;
+use vmx::host_tables::{GdtError, GdtRegion, TssError, TssRegion};
+use vmx::segment::DescriptorTable;
 use vmx::vmcs::{DesiredControls, VmcsError, VmcsRegion};
-use vmx::vmexit::{VmExitStack, VM_EXIT_STACK_SIZE};
-use vmx::vmxon::VmxOnRegion;
-
-use crate::vmx::host_tables::GdtRegion;
+use vmx::vmexit::{VmExitStack, VmExitStackError, VM_EXIT_STACK_SIZE};
+use vmx::vmxon::{VmxOnError, VmxOnRegion};
 
 const TAG: &str = "[Aleph0 Virtualization Hypervisor]";
+
+/// Why bring-up stopped. Each step returns one of these, so the sequence
+/// reads top to bottom with `?` and [`report_error`] prints the outcome.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BringUpError {
+    Tss(TssError),
+    Gdt(GdtError),
+    VmExitStack(VmExitStackError),
+    VmxNotSupportedByCpu,
+    VmxDisabledByFirmware,
+    VmxOn(VmxOnError),
+    /// A VMCS step failed; `operation` names the step for the report.
+    Vmcs { operation: &'static str, error: VmcsError },
+}
+
+impl From<TssError> for BringUpError {
+    fn from(error: TssError) -> Self {
+        Self::Tss(error)
+    }
+}
+
+impl From<GdtError> for BringUpError {
+    fn from(error: GdtError) -> Self {
+        Self::Gdt(error)
+    }
+}
+
+impl From<VmExitStackError> for BringUpError {
+    fn from(error: VmExitStackError) -> Self {
+        Self::VmExitStack(error)
+    }
+}
+
+impl From<VmxOnError> for BringUpError {
+    fn from(error: VmxOnError) -> Self {
+        Self::VmxOn(error)
+    }
+}
+
+/// Tags a VMCS failure with the step it came from, for use with `map_err`.
+fn vmcs_step(operation: &'static str) -> impl FnOnce(VmcsError) -> BringUpError {
+    move |error| BringUpError::Vmcs { operation, error }
+}
+
+/// The host GDT and TSS, plus the descriptor-table state recorded right
+/// after they were activated.
+struct HostTables {
+    _tss: TssRegion,
+    _gdt: GdtRegion,
+    gdtr: DescriptorTable,
+    tr: u16,
+    tss_base: u64,
+    idtr: DescriptorTable,
+}
+
+/// Everything the CPU may still use while it stays in VMX operation.
+struct Hypervisor {
+    _host_tables: HostTables,
+    _vmexit_stack: VmExitStack,
+    _vmxon: VmxOnRegion,
+    _vmcs: VmcsRegion,
+}
 
 #[entry]
 fn main() -> Status {
@@ -22,117 +83,89 @@ fn main() -> Status {
 
     uefi::println!("{TAG} UEFI helpers initialized successfully.");
 
-    let _tss_region = match TssRegion::allocate() {
-        Ok(region) => {
-            uefi::println!("{TAG} Host TSS allocated at {:#018x}; TR not loaded yet.", region.base());
-            Some(region)
-        }
+    // Held until the loop below: the CPU keeps using these regions for as
+    // long as it stays in VMX operation, so none may be freed before then.
+    let _hypervisor = match bring_up() {
+        Ok(hypervisor) => Some(hypervisor),
         Err(error) => {
-            uefi::println!("{TAG} Host TSS allocation failed: {error:?}");
+            report_error(error);
             None
         }
     };
-
-    let mut _gdt_region = match unsafe { GdtRegion::copy_active() } {
-        Ok(region) => {
-            uefi::println!("{TAG} Host GDT copied at {:#018x}.", region.base());
-            Some(region)
-        }
-        Err(error) => {
-            uefi::println!("{TAG} Host GDT copy failed: {error:?}");
-            None
-        }
-    };
-
-    let mut activated_tables = None;
-    if let (Some(tss), Some(gdt)) = (_tss_region.as_ref(), _gdt_region.as_mut()) {
-        match gdt.append_tss_descriptor(tss) {
-            Ok(selector) => {
-                if gdt.verify_tss_descriptor(tss) {
-                    match gdt.prepared_gdtr() {
-                        Some(prepared) if prepared.base == gdt.base() && prepared.limit == selector + 15 => {
-                            uefi::println!(
-                                "{TAG} Host GDT prepared: base={:#018x} limit={:#06x} tr_selector={selector:#06x}.",
-                                prepared.base, prepared.limit,
-                            );
-                            match unsafe { gdt.activate(tss) } {
-                                Ok(()) => {
-                                    activated_tables = Some((prepared, selector, tss.base(), unsafe { vmx::segment::read_idtr() }));
-                                    uefi::println!("{TAG} Host GDT and TSS activated and verified.");
-                                }
-                                Err(error) => uefi::println!(
-                                    "{TAG} Host GDT/TSS activation failed: {error:?}; GDTR/TR may have changed."
-                                ),
-                            }
-                        }
-                        _ => uefi::println!("{TAG} Prepared GDTR verification failed; GDTR/TR unchanged."),
-                    }
-                } else {
-                    uefi::println!("{TAG} TSS descriptor verification failed; GDTR/TR unchanged.");
-                }
-            }
-            Err(error) => {
-                uefi::println!("{TAG} TSS descriptor append failed: {error:?}");
-            }
-        }
-    }
-
-    // Independent of VMX, so this runs and prints even under QEMU/TCG.
-    dump_segment_state();
-
-    let _vmexit_stack = match VmExitStack::allocate() {
-        Ok(stack) => {
-            uefi::println!("{TAG} VM-exit stack allocated: top={:#018x} size={VM_EXIT_STACK_SIZE}; HOST_RSP not set.", stack.top());
-            Some(stack)
-        }
-        Err(error) => {
-            uefi::println!("{TAG} VM-exit stack allocation failed: {error:?}");
-            None
-        }
-    };
-
-    // Held until the loop below: the CPU keeps using both regions for as long
-    // as it stays in VMX operation, so neither may be dropped before then.
-    let _vmx_state = bring_up_vmx(activated_tables.is_some(), _vmexit_stack.as_ref());
-
-    if let Some((expected_gdtr, expected_tr, expected_tss_base, expected_idtr)) = activated_tables {
-        let gdtr = unsafe { vmx::segment::read_gdtr() };
-        let tr = unsafe { vmx::segment::read_tr() };
-        let idtr = unsafe { vmx::segment::read_idtr() };
-        let same_gdtr = gdtr.base == expected_gdtr.base && gdtr.limit == expected_gdtr.limit;
-        let same_idtr = idtr.base == expected_idtr.base && idtr.limit == expected_idtr.limit;
-        let same_tss_base = same_gdtr && tr == expected_tr
-            && unsafe { vmx::segment::segment_base_from_gdt(&gdtr, tr) } == expected_tss_base;
-
-        if same_gdtr && same_idtr && same_tss_base {
-            uefi::println!("{TAG} Host GDTR, TR, TSS base and IDTR preserved after VMX/UEFI calls.");
-        } else {
-            uefi::println!("{TAG} WARNING: Host descriptor state changed after VMX/UEFI calls.");
-            uefi::println!("{TAG} Expected GDTR={expected_gdtr:?} TR={expected_tr:#06x} TSS={expected_tss_base:#018x} IDTR={expected_idtr:?}");
-            uefi::println!("{TAG} Actual GDTR={gdtr:?} TR={tr:#06x} IDTR={idtr:?} TSS base matches={same_tss_base}");
-        }
-    }
 
     loop { }
 }
 
-/// Detects VMX, enters root operation, then exercises the VMCS access path.
+/// Activates the host tables, enters VMX operation, and prepares the VMCS.
 ///
-/// Returns the regions so the caller can keep them alive. The VMCS is
-/// optional: VMXON can succeed while the VMCS self-test fails.
-fn bring_up_vmx(host_tables_active: bool, vmexit_stack: Option<&VmExitStack>) -> Option<(VmxOnRegion, Option<VmcsRegion>)> {
+/// Stops at the first failure. Regions allocated before that point are
+/// leaked rather than freed (none implement `Drop`), so memory the CPU may
+/// still reference — such as the VMXON region — is never returned to UEFI.
+fn bring_up() -> Result<Hypervisor, BringUpError> {
+    let host_tables = activate_host_tables()?;
+
+    // Independent of VMX, so this runs and prints even under QEMU/TCG.
+    dump_segment_state();
+
+    let vmexit_stack = VmExitStack::allocate()?;
+    uefi::println!("{TAG} VM-exit stack allocated: top={:#018x} size={VM_EXIT_STACK_SIZE}.", vmexit_stack.top());
+
+    let (vmxon, vmcs) = bring_up_vmx(&vmexit_stack)?;
+
+    check_host_tables_preserved(&host_tables);
+
+    Ok(Hypervisor {
+        _host_tables: host_tables,
+        _vmexit_stack: vmexit_stack,
+        _vmxon: vmxon,
+        _vmcs: vmcs,
+    })
+}
+
+/// Builds a GDT that adds a TSS descriptor to a copy of the firmware's GDT,
+/// loads it with LTR, and records the resulting state for later checks.
+fn activate_host_tables() -> Result<HostTables, BringUpError> {
+    let tss = TssRegion::allocate()?;
+    uefi::println!("{TAG} Host TSS allocated at {:#018x}; TR not loaded yet.", tss.base());
+
+    let mut gdt = unsafe { GdtRegion::copy_active() }?;
+    uefi::println!("{TAG} Host GDT copied at {:#018x}.", gdt.base());
+
+    let selector = gdt.append_tss_descriptor(&tss)?;
+    if !gdt.verify_tss_descriptor(&tss) {
+        return Err(GdtError::TssVerificationFailed.into());
+    }
+    let prepared = gdt
+        .prepared_gdtr()
+        .filter(|prepared| prepared.base == gdt.base() && prepared.limit == selector + 15)
+        .ok_or(GdtError::GdtrPreparationFailed)?;
+    uefi::println!(
+        "{TAG} Host GDT prepared: base={:#018x} limit={:#06x} tr_selector={selector:#06x}.",
+        prepared.base, prepared.limit,
+    );
+
+    unsafe { gdt.activate(&tss) }?;
+    uefi::println!("{TAG} Host GDT and TSS activated and verified.");
+
+    Ok(HostTables {
+        gdtr: prepared,
+        tr: selector,
+        tss_base: tss.base(),
+        idtr: unsafe { vmx::segment::read_idtr() },
+        _tss: tss,
+        _gdt: gdt,
+    })
+}
+
+/// Detects VMX, enters root operation, then prepares the VMCS controls and
+/// host state. VM entry is not attempted.
+fn bring_up_vmx(vmexit_stack: &VmExitStack) -> Result<(VmxOnRegion, VmcsRegion), BringUpError> {
     match unsafe { vmx::detect() } {
         VmxCapabilities::Supported => {
             uefi::println!("{TAG} VMX supported and enabled by firmware.");
         }
-        VmxCapabilities::NotSupportedByCpu => {
-            uefi::println!("{TAG} VMX not supported by this CPU.");
-            return None;
-        }
-        VmxCapabilities::DisabledByFirmware => {
-            uefi::println!("{TAG} VMX supported by CPU but disabled by firmware.");
-            return None;
-        }
+        VmxCapabilities::NotSupportedByCpu => return Err(BringUpError::VmxNotSupportedByCpu),
+        VmxCapabilities::DisabledByFirmware => return Err(BringUpError::VmxDisabledByFirmware),
     }
 
     let controls = unsafe { vmx::msr::read_vmcs_control_msrs() };
@@ -152,61 +185,73 @@ fn bring_up_vmx(host_tables_active: bool, vmexit_stack: Option<&VmExitStack>) ->
         );
     }
 
-    let vmxon_region = match unsafe { vmx::vmxon::enter_vmx_root_operation() } {
-        Ok(region) => {
-            uefi::println!("{TAG} Entered VMX root operation.");
-            region
-        }
-        Err(e) => {
-            uefi::println!("{TAG} VMXON failed: {e:?}");
-            return None;
-        }
-    };
+    let vmxon = unsafe { vmx::vmxon::enter_vmx_root_operation() }?;
+    uefi::println!("{TAG} Entered VMX root operation.");
 
     // Only legal now: the VMCS instructions raise #UD outside VMX operation.
-    let vmcs_region = match unsafe { vmx::vmcs::self_test() } {
-        Ok(region) => {
-            uefi::println!("{TAG} VMCS self-test passed: VMREAD returned what VMWRITE stored.");
-            match unsafe { vmx::vmcs::configure_controls(&controls, DesiredControls::minimal_64_bit_guest()) } {
-                Ok(()) => {
-                    uefi::println!("{TAG} VMCS controls written and read back successfully.");
-                    if host_tables_active {
-                        match unsafe { vmx::vmcs::configure_host_state() } {
-                            Ok(()) => match unsafe { vmx::vmcs::vmread(vmx::vmcs::VM_EXIT_CONTROLS) } {
-                                Ok(exit_controls) => {
-                                    uefi::println!(
-                                        "{TAG} VMCS host fields written and read back; host PAT load={} EFER load={}; VM entry not attempted.",
-                                        exit_controls & vmx::vmcs::VM_EXIT_LOAD_IA32_PAT != 0,
-                                        exit_controls & vmx::vmcs::VM_EXIT_LOAD_IA32_EFER != 0,
-                                    );
-                                    if let Some(stack) = vmexit_stack {
-                                        match unsafe { vmx::vmcs::configure_host_entry(stack.top(), vmx::vmexit::entry_address()) } {
-                                            Ok(()) => uefi::println!("{TAG} VMCS HOST_RSP/HOST_RIP written and read back; VM entry not attempted."),
-                                            Err(error) => report_vmcs_error("host entry address setup", error),
-                                        }
-                                    } else {
-                                        uefi::println!("{TAG} VMCS HOST_RSP/HOST_RIP setup skipped: VM-exit stack not allocated.");
-                                    }
-                                }
-                                Err(error) => report_vmcs_error("exit-control readback", error),
-                            },
-                            Err(error) => report_vmcs_error("host-state setup", error),
-                        }
-                    } else {
-                        uefi::println!("{TAG} VMCS host-state setup skipped: host GDT/TSS not activated.");
-                    }
-                }
-                Err(error) => report_vmcs_error("control setup", error),
-            }
-            Some(region)
-        }
-        Err(e) => {
-            report_vmcs_error("self-test", e);
-            None
-        }
-    };
+    let vmcs = unsafe { VmcsRegion::create_current() }.map_err(vmcs_step("creation"))?;
+    unsafe { vmx::vmcs::self_test() }.map_err(vmcs_step("self-test"))?;
+    uefi::println!("{TAG} VMCS self-test passed: VMREAD returned what VMWRITE stored.");
 
-    Some((vmxon_region, vmcs_region))
+    unsafe { vmx::vmcs::configure_controls(&controls, DesiredControls::minimal_64_bit_guest()) }
+        .map_err(vmcs_step("control setup"))?;
+    uefi::println!("{TAG} VMCS controls written and read back successfully.");
+
+    unsafe { vmx::vmcs::configure_host_state() }.map_err(vmcs_step("host-state setup"))?;
+    let exit_controls = unsafe { vmx::vmcs::vmread(vmx::vmcs::VM_EXIT_CONTROLS) }
+        .map_err(vmcs_step("exit-control readback"))?;
+    uefi::println!(
+        "{TAG} VMCS host fields written and read back; host PAT load={} EFER load={}; VM entry not attempted.",
+        exit_controls & vmx::vmcs::VM_EXIT_LOAD_IA32_PAT != 0,
+        exit_controls & vmx::vmcs::VM_EXIT_LOAD_IA32_EFER != 0,
+    );
+
+    unsafe { vmx::vmcs::configure_host_entry(vmexit_stack.top(), vmx::vmexit::entry_address()) }
+        .map_err(vmcs_step("host entry address setup"))?;
+    uefi::println!("{TAG} VMCS HOST_RSP/HOST_RIP written and read back; VM entry not attempted.");
+
+    Ok((vmxon, vmcs))
+}
+
+/// Confirms that VMXON, the VMCS work, and UEFI calls left the host GDTR,
+/// TR, TSS base, and IDTR as they were after activation.
+fn check_host_tables_preserved(expected: &HostTables) {
+    let gdtr = unsafe { vmx::segment::read_gdtr() };
+    let tr = unsafe { vmx::segment::read_tr() };
+    let idtr = unsafe { vmx::segment::read_idtr() };
+    let same_gdtr = gdtr.base == expected.gdtr.base && gdtr.limit == expected.gdtr.limit;
+    let same_idtr = idtr.base == expected.idtr.base && idtr.limit == expected.idtr.limit;
+    let same_tss_base = same_gdtr && tr == expected.tr
+        && unsafe { vmx::segment::segment_base_from_gdt(&gdtr, tr) } == expected.tss_base;
+
+    if same_gdtr && same_idtr && same_tss_base {
+        uefi::println!("{TAG} Host GDTR, TR, TSS base and IDTR preserved after VMX/UEFI calls.");
+    } else {
+        uefi::println!("{TAG} WARNING: Host descriptor state changed after VMX/UEFI calls.");
+        uefi::println!(
+            "{TAG} Expected GDTR={:?} TR={:#06x} TSS={:#018x} IDTR={:?}",
+            expected.gdtr, expected.tr, expected.tss_base, expected.idtr,
+        );
+        uefi::println!("{TAG} Actual GDTR={gdtr:?} TR={tr:#06x} IDTR={idtr:?} TSS base matches={same_tss_base}");
+    }
+}
+
+/// Prints why bring-up stopped.
+fn report_error(error: BringUpError) {
+    match error {
+        BringUpError::Tss(error) => uefi::println!("{TAG} Host TSS allocation failed: {error:?}"),
+        // Only this variant comes after LGDT/LTR; every other GdtError is
+        // returned before the CPU's tables are touched.
+        BringUpError::Gdt(GdtError::ActivationVerificationFailed) => uefi::println!(
+            "{TAG} Host GDT/TSS activation failed verification; the CPU may already use the new tables."
+        ),
+        BringUpError::Gdt(error) => uefi::println!("{TAG} Host GDT/TSS setup failed: {error:?}; GDTR/TR unchanged."),
+        BringUpError::VmExitStack(error) => uefi::println!("{TAG} VM-exit stack allocation failed: {error:?}"),
+        BringUpError::VmxNotSupportedByCpu => uefi::println!("{TAG} VMX not supported by this CPU."),
+        BringUpError::VmxDisabledByFirmware => uefi::println!("{TAG} VMX supported by CPU but disabled by firmware."),
+        BringUpError::VmxOn(error) => uefi::println!("{TAG} VMXON failed: {error:?}"),
+        BringUpError::Vmcs { operation, error } => report_vmcs_error(operation, error),
+    }
 }
 
 /// Prints a VMCS failure, decoding the VM-instruction error when one exists.

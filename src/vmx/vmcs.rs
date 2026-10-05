@@ -21,6 +21,8 @@
 //!    [`vmread`]/[`vmwrite`] act on it implicitly, with no address operand.
 //! 4. [`vmwrite`] the fields, then (a later step) VMLAUNCH.
 //!
+//! [`VmcsRegion::create_current`] runs steps 1-3.
+//!
 //! Fields are addressed by a 32-bit **encoding**, not by an offset. The
 //! encoding packs the field's width, type (control / read-only / guest /
 //! host) and index — see the constants below.
@@ -219,6 +221,26 @@ impl VmcsRegion {
 
         Ok(check_rflags(rflags)?)
 
+    }
+
+    /// Allocates a VMCS, initialises it, and makes it the current VMCS.
+    ///
+    /// Runs lifecycle steps 1-3. The region must stay allocated for as long
+    /// as it is current or may become current again.
+    ///
+    /// # Safety
+    ///
+    /// The CPU must be in VMX root operation.
+    pub unsafe fn create_current() -> Result<Self, VmcsError> {
+        unsafe {
+            let mut region = Self::allocate()?;
+            // Before VMPTRLD, not just before use: VMPTRLD rejects a region
+            // whose revision identifier does not match the CPU (error 11).
+            region.write_revision_id(vmcs_revision_id());
+            region.vmclear()?;
+            region.vmptrld()?;
+            Ok(region)
+        }
     }
 
     /// Makes this VMCS the current one for this logical processor.
@@ -478,29 +500,23 @@ pub fn vm_instruction_error_name(error: u32) -> &'static str {
     }
 }
 
-/// Proves the whole access path works: allocate, make current, write a field,
-/// read it back.
+/// Proves the access path to the current VMCS works: write a field, read
+/// it back.
 ///
-/// Requires the CPU to already be in VMX operation (VMXON done).
-pub unsafe fn self_test() -> Result<VmcsRegion, VmcsError> {
+/// Requires VMX operation and a current VMCS ([`VmcsRegion::create_current`]).
+/// Leaves the test pattern in GUEST_RIP; guest-state setup overwrites it.
+pub unsafe fn self_test() -> Result<(), VmcsError> {
     // Bits set in both halves, so a write that only lands in the low 32 bits
     // is caught. Canonical (bits 63:47 clear), which GUEST_RIP will need once
     // VM entry starts checking it.
     const PATTERN: u64 = 0x0000_7FFF_DEAD_BEEF;
 
     unsafe {
-        let mut vmcs_region = VmcsRegion::allocate()?;
-        // Before VMPTRLD, not just before use: VMPTRLD rejects a region whose
-        // revision identifier does not match the CPU (error 11).
-        vmcs_region.write_revision_id(vmcs_revision_id());
-        vmcs_region.vmclear()?;
-        vmcs_region.vmptrld()?;
-
         vmwrite(GUEST_RIP, PATTERN)?;
         if vmread(GUEST_RIP)? != PATTERN {
             return Err(VmcsError::SelfTestMismatch);
         }
-
-        Ok(vmcs_region)
     }
+
+    Ok(())
 }

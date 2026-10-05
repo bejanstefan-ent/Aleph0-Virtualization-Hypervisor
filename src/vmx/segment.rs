@@ -297,3 +297,43 @@ pub unsafe fn read_all() -> SegmentState {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Describe `gdt` the way GDTR would.
+    fn table(gdt: &[u8]) -> DescriptorTable {
+        DescriptorTable { base: gdt.as_ptr() as u64, limit: gdt.len() as u16 - 1 }
+    }
+
+    #[test]
+    fn null_and_ldt_selectors_return_zero() {
+        let gdt = [0xFFu8; 32];
+        let gdt = table(&gdt);
+        for selector in [0x0, 0x1, 0x3] {
+            assert_eq!(unsafe { segment_base_from_gdt(&gdt, selector) }, 0, "selector {selector:#x}");
+        }
+        // TI=1 names the LDT, which this decoder does not read.
+        assert_eq!(unsafe { segment_base_from_gdt(&gdt, 0x0C) }, 0);
+    }
+
+    #[test]
+    fn selector_past_limit_returns_zero() {
+        // The 16-byte read at 0x10 needs 12 bytes; only 8 are inside the limit.
+        let gdt = [0xFFu8; 24];
+        assert_eq!(unsafe { segment_base_from_gdt(&table(&gdt), 0x10) }, 0);
+    }
+
+    #[test]
+    fn rpl_bits_are_ignored() {
+        let mut gdt = [0u8; 32];
+        gdt[0x10 + 2] = 0x78;
+        gdt[0x10 + 3] = 0x56;
+        gdt[0x10 + 4] = 0x34;
+        gdt[0x10 + 7] = 0x12;
+        let gdt = table(&gdt);
+        assert_eq!(unsafe { segment_base_from_gdt(&gdt, 0x10) }, 0x1234_5678);
+        assert_eq!(unsafe { segment_base_from_gdt(&gdt, 0x13) }, 0x1234_5678);
+    }
+}

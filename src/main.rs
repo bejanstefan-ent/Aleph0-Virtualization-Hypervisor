@@ -1,5 +1,7 @@
-#![no_main]
-#![no_std]
+// Host unit tests (`cargo test --target <host triple>`) build with std and
+// the test harness; the UEFI build is no_std with a firmware entry point.
+#![cfg_attr(not(test), no_main)]
+#![cfg_attr(not(test), no_std)]
 
 use uefi::prelude::*;
 
@@ -75,7 +77,7 @@ struct Hypervisor {
     _vmcs: VmcsRegion,
 }
 
-#[entry]
+#[cfg_attr(not(test), entry)]
 fn main() -> Status {
     uefi::println!("{TAG} Initializing UEFI helpers...");
 

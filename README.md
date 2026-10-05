@@ -20,6 +20,16 @@ cargo build            # produces target\x86_64-unknown-uefi\debug\aleph0hypervi
 
 `.cargo/config.toml` makes the UEFI target the default.
 
+## Test
+
+```powershell
+cargo test-host        # alias for: cargo test --target x86_64-pc-windows-msvc
+```
+
+Unit tests cover the pure logic (RFLAGS decoding, control-value selection,
+descriptor encoding/decoding) and run on the host. Nothing that executes VMX
+instructions can be unit-tested; that still needs a boot under Hyper-V.
+
 ## Run
 
 **Hyper-V (VMX available):** from an elevated PowerShell session,

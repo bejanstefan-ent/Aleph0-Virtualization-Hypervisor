@@ -4,4 +4,9 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+uefi = "0.40"
+
+# The UEFI build needs uefi's panic handler. Host builds (`cargo test`)
+# use std's, and two panic handlers would not link.
+[target.'cfg(target_os = "uefi")'.dependencies]
 uefi = { version = "0.40", features = ["panic_handler"] }

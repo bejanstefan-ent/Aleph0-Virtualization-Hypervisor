@@ -1,2 +1,6 @@
 [build]
 target = "x86_64-unknown-uefi"
+
+[alias]
+# Unit tests run on the host; the UEFI target has no test harness.
+test-host = "test --target x86_64-pc-windows-msvc"

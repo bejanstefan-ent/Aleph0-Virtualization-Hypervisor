@@ -68,6 +68,7 @@ There is no guest execution, observed VM exit, EPT, or OS boot yet. The VM-exit 
 ## How to verify each milestone
 
 - Run `cargo build --target x86_64-unknown-uefi` after each change. It checks compilation, not VM-entry validity.
+- Run `cargo test-host` for the host unit tests of pure logic (RFLAGS decoding, control selection, descriptor encoding). They do not execute VMX instructions.
 - Run `run-hyperv.ps1` from an elevated PowerShell session and inspect the VM console. The runner turns off the named test VM and recreates its ESP VHDX; do not keep irreplaceable data there.
 - Record observed VMX instruction errors and VM-exit reasons as milestones are reached. QEMU without nested VMX can still test non-VMX diagnostics, but cannot validate `VMLAUNCH`.
 

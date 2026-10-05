@@ -25,6 +25,7 @@
 
 use core::arch::asm;
 use super::cr;
+use super::instruction::{check_rflags, VmxFail};
 use super::msr;
 use super::page::{allocate_zeroed_page, PAGE_SIZE};
 
@@ -51,23 +52,12 @@ pub enum VmxOnError {
     VmFailValid,
 }
 
-/// Decodes the RFLAGS value a VMX instruction leaves behind.
-///
-/// Every VMX instruction reports its outcome the same way: all flags clear on
-/// success, CF set for VMfailInvalid, ZF set for VMfailValid. Call this right
-/// after the `asm!` block instead of repeating the bit tests.
-pub fn check_rflags(rflags: u64) -> Result<(), VmxOnError> {
-    /// RFLAGS.CF, bit 0.
-    const CF: u64 = 1 << 0;
-    /// RFLAGS.ZF, bit 6.
-    const ZF: u64 = 1 << 6;
-
-    if rflags & CF != 0 {
-        Err(VmxOnError::VmFailInvalid)
-    } else if rflags & ZF != 0 {
-        Err(VmxOnError::VmFailValid)
-    } else {
-        Ok(())
+impl From<VmxFail> for VmxOnError {
+    fn from(fail: VmxFail) -> Self {
+        match fail {
+            VmxFail::Invalid => Self::VmFailInvalid,
+            VmxFail::Valid => Self::VmFailValid,
+        }
     }
 }
 
@@ -131,7 +121,7 @@ pub unsafe fn vmxon(region: &VmxOnRegion) -> Result<(), VmxOnError> {
         );
     }
 
-    check_rflags(rflags)
+    Ok(check_rflags(rflags)?)
 }
 
 /// The region must stay allocated for as long as the CPU is in VMX

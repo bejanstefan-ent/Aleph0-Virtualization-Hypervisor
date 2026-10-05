@@ -15,6 +15,7 @@
 //! installed yet.
 
 pub mod cpuid;
+pub mod instruction;
 pub mod msr;
 pub mod cr;
 pub mod vmxon;

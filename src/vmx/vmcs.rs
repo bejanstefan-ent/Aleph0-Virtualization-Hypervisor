@@ -33,6 +33,7 @@
 use core::arch::asm;
 use crate::vmx::msr::{self, VmcsControlMsrs};
 use crate::vmx::{cr, segment};
+use crate::vmx::instruction::{check_rflags, VmxFail};
 
 use super::page::{allocate_zeroed_page, PAGE_SIZE};
 use super::vmxon::vmcs_revision_id;
@@ -156,23 +157,12 @@ pub enum VmcsError {
     HostStateValidation,
 }
 
-/// Decodes the RFLAGS value a VMX instruction leaves behind.
-///
-/// Every VMX instruction reports its outcome the same way: all flags clear on
-/// success, CF set for VMfailInvalid, ZF set for VMfailValid. Call this right
-/// after the `asm!` block instead of repeating the bit tests.
-pub fn check_rflags(rflags: u64) -> Result<(), VmcsError> {
-    /// RFLAGS.CF, bit 0.
-    const CF: u64 = 1 << 0;
-    /// RFLAGS.ZF, bit 6.
-    const ZF: u64 = 1 << 6;
-
-    if rflags & CF != 0 {
-        Err(VmcsError::VmFailInvalid)
-    } else if rflags & ZF != 0 {
-        Err(VmcsError::VmFailValid)
-    } else {
-        Ok(())
+impl From<VmxFail> for VmcsError {
+    fn from(fail: VmxFail) -> Self {
+        match fail {
+            VmxFail::Invalid => Self::VmFailInvalid,
+            VmxFail::Valid => Self::VmFailValid,
+        }
     }
 }
 
@@ -227,7 +217,7 @@ impl VmcsRegion {
             );
         }
 
-        check_rflags(rflags)
+        Ok(check_rflags(rflags)?)
 
     }
 
@@ -244,7 +234,7 @@ impl VmcsRegion {
             );
         }
 
-        check_rflags(rflags)
+        Ok(check_rflags(rflags)?)
     }
 }
 
@@ -293,7 +283,7 @@ pub unsafe fn vmwrite(field_encoding: u32, value: u64) -> Result<(), VmcsError> 
         );
     }
 
-    check_rflags(rflags)
+    Ok(check_rflags(rflags)?)
 }
 
 /// Derive legal pin, primary, exit, and entry controls from the CPU masks,

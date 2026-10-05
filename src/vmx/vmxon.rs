@@ -126,6 +126,9 @@ pub unsafe fn vmxon(region: &VmxOnRegion) -> Result<(), VmxOnError> {
 
 /// The region must stay allocated for as long as the CPU is in VMX
 /// operation; dropping it while VMX is on is undefined behaviour.
+///
+/// If VMXON fails, CR0 and CR4 are restored, so CR4.VMXE is not left set
+/// outside VMX operation.
 pub unsafe fn enter_vmx_root_operation() -> Result<VmxOnRegion, VmxOnError> {
     unsafe {
         let region_size = (msr::rdmsr(msr::IA32_VMX_BASIC) >> 32) & 0x1fff;
@@ -133,11 +136,19 @@ pub unsafe fn enter_vmx_root_operation() -> Result<VmxOnRegion, VmxOnError> {
             return Err(VmxOnError::UnsupportedRegionSize);
         }
 
-        cr::enable_vmxe();
-        apply_fixed_bits();
+        // Allocate before touching CR0/CR4 so VMXON is the only step that
+        // can fail with the control registers modified.
         let mut vmxon_region = VmxOnRegion::allocate()?;
         vmxon_region.write_revision_id(vmcs_revision_id());
-        vmxon(&vmxon_region)?;
+
+        let (original_cr0, original_cr4) = (cr::read_cr0(), cr::read_cr4());
+        cr::enable_vmxe();
+        apply_fixed_bits();
+        if let Err(error) = vmxon(&vmxon_region) {
+            cr::write_cr0(original_cr0);
+            cr::write_cr4(original_cr4);
+            return Err(error);
+        }
         Ok(vmxon_region)
     }
 }

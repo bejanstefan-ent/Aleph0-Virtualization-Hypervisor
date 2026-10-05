@@ -1,5 +1,12 @@
 //! Firmware-independent debug output over the COM1 serial port.
 //!
+//! Further reading, kept in the repository so it is not forgotten:
+//!
+//! * `docs/SERIAL_LOGGING.md`: a beginner walkthrough of this file. Its
+//!   step numbers match the `Step N` comments below.
+//! * `docs/PORT_IO.md`: how `in`/`out` and the 16-bit I/O port space work,
+//!   and how a hypervisor intercepts them.
+//!
 //! # Why not `uefi::println!`?
 //!
 //! `uefi::println!` calls the firmware's console driver. That is fine in
@@ -20,9 +27,31 @@
 //!
 //! A UART turns bytes into a bit stream on a wire. The PC-compatible one sits
 //! at I/O port base `0x3F8` (COM1) and exposes eight byte-wide registers at
-//! `base + 0` through `base + 7`. Port I/O is a separate address space from
-//! memory, reached only through `in`/`out`, which are privileged like
-//! `rdmsr` or `mov cr4`.
+//! `base + 0` through `base + 7`.
+//!
+//! # Port I/O in short
+//!
+//! x86 has two address spaces. Memory is reached with ordinary instructions
+//! (`mov`). The **I/O space** is separate and **16 bits wide**: port numbers
+//! run from `0x0000` to `0xFFFF` (65,536 ports, one byte each), and only the
+//! `in`/`out` instructions reach it. Port `0x3F8` and memory address `0x3F8`
+//! are unrelated.
+//!
+//! * `out dx, al` sends the byte in AL to the port numbered by DX;
+//!   `in al, dx` reads a byte from port DX into AL.
+//! * The port must be in DX here: the other form, with the port written
+//!   into the instruction, only reaches ports `0x00`–`0xFF`, and COM1 is
+//!   above that.
+//! * Data can be 8, 16 or 32 bits (AL, AX, EAX). The UART's registers are
+//!   all 8-bit, so this file only uses byte access ([`outb`], [`inb`]).
+//! * The CPU sends the access to the chipset as an I/O transaction, and the
+//!   device that claims that port answers. No device means a read of `0xFF`.
+//! * Ports are not memory: a read can change device state, and writing and
+//!   reading the same port can reach two different registers.
+//! * Ring 0 may use any port; this code always runs at ring 0.
+//!
+//! Under Hyper-V, every `in`/`out` here causes a VM exit (reason 30) and
+//! Hyper-V's emulated UART answers. Details: `docs/PORT_IO.md`.
 //!
 //! The registers used here, by offset from the base:
 //!
@@ -69,10 +98,14 @@ use core::arch::asm;
 use core::fmt;
 use core::sync::atomic::{AtomicBool, Ordering};
 
-/// I/O port base of COM1.
+// Step 1: where the chip lives. COM1 claims the 8 ports 0x3F8..=0x3FF and
+// uses the low 3 bits of the port number to pick one of its registers.
+
+/// I/O port base of COM1. A `u16` because port numbers are 16-bit.
 pub const COM1: u16 = 0x3F8;
 
 /// Register offsets from the port base. See the module table.
+/// Offset 0 is two registers: writing it sends a byte, reading it receives.
 const DATA: u16 = 0;
 const INTERRUPT_ENABLE: u16 = 1;
 const FIFO_CONTROL: u16 = 2;
@@ -108,7 +141,23 @@ pub const fn divisor(baud: u32) -> u16 {
     (115_200 / baud) as u16
 }
 
-/// Writes one byte to an I/O port.
+// Step 0: the only two ways this driver touches hardware. Everything else in
+// the file is calls to these.
+//
+// The `asm!` options are promises to the compiler:
+// - `nostack`: the instruction does not push or pop;
+// - `preserves_flags`: `in`/`out` do not change RFLAGS;
+// - `nomem`: the instruction does not read or write memory, so the compiler
+//   may move ordinary memory accesses across it. True for the UART, which
+//   never touches RAM. Do NOT copy `nomem` into port I/O for a DMA device
+//   (one that reads a buffer in RAM after an `out` command): the compiler
+//   could then move the buffer writes after the command.
+
+/// Writes one byte to an I/O port: `out dx, al`.
+///
+/// `in("dx") port` loads the 16-bit port number into DX and `in("al") value`
+/// loads the byte into AL before the instruction runs; the CPU then sends an
+/// I/O write for that port to the chipset.
 ///
 /// # Safety
 ///
@@ -120,12 +169,17 @@ unsafe fn outb(port: u16, value: u8) {
     }
 }
 
-/// Reads one byte from an I/O port.
+/// Reads one byte from an I/O port: `in al, dx`.
+///
+/// `in("dx") port` loads the port number into DX; afterwards `out("al")`
+/// copies the byte the device returned from AL into `value`. A port no
+/// device claims reads as `0xFF`.
 ///
 /// # Safety
 ///
-/// Some device registers change state when read; the port must belong to a
-/// device this code owns.
+/// Some device registers change state when read (reading the UART's data
+/// register removes the received byte); the port must belong to a device
+/// this code owns.
 unsafe fn inb(port: u16) -> u8 {
     let value: u8;
     unsafe {
@@ -151,21 +205,31 @@ pub fn init() -> Result<(), SerialError> {
     let [divisor_low, divisor_high] = divisor(115_200).to_le_bytes();
 
     unsafe {
-        // No UART interrupts: this driver polls, and no handler exists.
+        // Step 2a: no UART interrupts. This driver polls the status
+        // register instead, and no interrupt handler exists.
         outb(COM1 + INTERRUPT_ENABLE, 0);
 
-        // Set the speed. DLAB repurposes offsets 0/1 while it is set.
-        outb(COM1 + LINE_CONTROL, LINE_DLAB);
-        outb(COM1 + DATA, divisor_low);
-        outb(COM1 + INTERRUPT_ENABLE, divisor_high);
-        // Clearing DLAB while setting the frame format restores 0/1.
+        // Step 2b: set the speed. Baud = bits per second on the wire, and
+        // the chip produces it as 115200 / divisor. The divisor is 16 bits,
+        // split across offsets 0 (low) and 1 (high), which only hold it
+        // while DLAB (line control bit 7) is set, like holding Shift.
+        outb(COM1 + LINE_CONTROL, LINE_DLAB);           // 0b1000_0000: DLAB on
+        outb(COM1 + DATA, divisor_low);                 // offset 0 = divisor low
+        outb(COM1 + INTERRUPT_ENABLE, divisor_high);    // offset 1 = divisor high
+
+        // Step 2c: frame format 8N1 (8 data bits, no parity, 1 stop bit).
+        // Writing 0b0000_0011 also clears bit 7, turning DLAB off, so
+        // offsets 0/1 are data and interrupt enable again. Forgetting this
+        // is the classic bug: every "send" would change the speed instead.
         outb(COM1 + LINE_CONTROL, LINE_8N1);
 
+        // Step 2d: enable and empty the 16-byte transmit/receive queues.
         outb(COM1 + FIFO_CONTROL, FIFO_ENABLE_AND_CLEAR);
 
-        // Loopback: the UART feeds its transmitter into its own receiver,
-        // so a byte written must come straight back. A missing device reads
-        // as 0xFF and fails this check.
+        // Step 3: prove a UART is here. Loopback makes the chip feed its
+        // transmitter into its own receiver, so a byte written must come
+        // straight back. A port no device claims reads as 0xFF and fails
+        // this check. Nothing leaves the chip while loopback is on.
         const PROBE: u8 = 0xAE;
         outb(COM1 + MODEM_CONTROL, MODEM_READY | MODEM_LOOPBACK);
         outb(COM1 + DATA, PROBE);
@@ -177,8 +241,11 @@ pub fn init() -> Result<(), SerialError> {
             }
         }
 
-        // Leave loopback whatever the result, so the port is usable by the
-        // firmware's own console driver again.
+        // End of step 3, and step 2e: leave loopback whatever the result
+        // and signal "ready" (DTR + RTS + OUT2). Step 2e lives here because
+        // the loopback test also writes modem control. From here on, bytes
+        // leave the chip normally, and the firmware's own console driver
+        // can use the port again.
         outb(COM1 + MODEM_CONTROL, MODEM_READY);
 
         if received != Some(PROBE) {
@@ -192,12 +259,19 @@ pub fn init() -> Result<(), SerialError> {
 
 /// Sends one byte, waiting (boundedly) for the transmitter.
 /// Does nothing until [`init`] has succeeded.
+///
+/// Step 4. Line status bit 5 is a light the chip controls: writing a byte
+/// turns it off (busy), and the chip turns it back on by itself once it has
+/// taken the byte. Reading the status only looks at the light; it does not
+/// make the chip ready. Under Hyper-V the light is back on instantly.
 pub fn write_byte(byte: u8) {
     if !READY.load(Ordering::Acquire) {
         return;
     }
 
     unsafe {
+        // Wait for "can take a byte", but never forever: a missing or
+        // stuck UART must not hang the hypervisor.
         for _ in 0..SPIN_LIMIT {
             if inb(COM1 + LINE_STATUS) & STATUS_TRANSMIT_EMPTY != 0 {
                 break;
@@ -209,6 +283,8 @@ pub fn write_byte(byte: u8) {
 
 /// Sends a string, expanding `\n` to `\r\n`: terminals need the carriage
 /// return to move back to column 0.
+///
+/// Step 5: a string is only bytes, so this is [`write_byte`] in a loop.
 pub fn write_str(text: &str) {
     for byte in text.bytes() {
         if byte == b'\n' {
@@ -220,6 +296,11 @@ pub fn write_str(text: &str) {
 
 /// Zero-sized handle that lets `core::fmt` format straight to the port,
 /// with no buffer or allocation.
+///
+/// Step 6: `core::fmt` can write to anything implementing `fmt::Write`.
+/// It hands over the formatted output in pieces as it produces them, and
+/// each piece goes straight to [`write_str`]. No heap is needed, which is
+/// why `serial_println!` is safe in the VM-exit handler.
 pub struct Serial;
 
 impl fmt::Write for Serial {

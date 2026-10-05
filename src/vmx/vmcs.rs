@@ -89,6 +89,12 @@ impl DesiredControls {
 pub const VM_INSTRUCTION_ERROR: u32 = 0x4400;
 /// Read-only: why the last VM exit happened.
 pub const VM_EXIT_REASON: u32 = 0x4402;
+/// Read-only: length in bytes of the instruction that caused the exit, for
+/// exits caused by an instruction (VMCALL, CPUID, ...). Used to advance RIP.
+pub const VM_EXIT_INSTRUCTION_LEN: u32 = 0x440C;
+/// Read-only: extra exit detail whose meaning depends on the exit reason
+/// (natural width), e.g. the faulting address for an EPT violation.
+pub const EXIT_QUALIFICATION: u32 = 0x6400;
 
 /// Guest RSP (natural width).
 pub const GUEST_RSP: u32 = 0x681C;

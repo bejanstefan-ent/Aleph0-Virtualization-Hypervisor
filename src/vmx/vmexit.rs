@@ -2,9 +2,7 @@
 
 use core::ptr::NonNull;
 
-use uefi::boot::MemoryType;
-
-use super::page::PAGE_SIZE;
+use super::page::{allocate_zeroed_pages, PAGE_SIZE};
 
 pub const VM_EXIT_STACK_PAGES: usize = 4;
 pub const VM_EXIT_STACK_SIZE: usize = VM_EXIT_STACK_PAGES * PAGE_SIZE;
@@ -23,20 +21,7 @@ pub struct VmExitStack {
 impl VmExitStack {
     /// Allocate a zeroed, page-aligned stack for the host VM-exit path.
     pub fn allocate() -> Result<Self, VmExitStackError> {
-        let base = uefi::boot::allocate_pages(
-            uefi::boot::AllocateType::AnyPages, 
-            MemoryType::LOADER_DATA, 
-            VM_EXIT_STACK_PAGES)
-        .map_err(|_| VmExitStackError::AllocationFailed)?;
-
-        // Verify page alignment
-        assert_eq!(base.as_ptr() as usize % PAGE_SIZE, 0);
-
-        // Zero the stack
-        unsafe {
-            core::ptr::write_bytes(base.as_ptr(), 0, VM_EXIT_STACK_SIZE);
-        }
-
+        let base = allocate_zeroed_pages(VM_EXIT_STACK_PAGES, VmExitStackError::AllocationFailed)?;
         Ok(Self { base })
     }
 

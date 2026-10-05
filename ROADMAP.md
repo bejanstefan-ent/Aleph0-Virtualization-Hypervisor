@@ -14,8 +14,21 @@ This is a learning-oriented Intel VT-x hypervisor booted as a UEFI application. 
 - [x] Discover VMX control MSRs, select legal control values, and write/read back the four VMCS control fields.
 - [x] Write/read back host selectors, CRs, segment/table bases, SYSENTER state, and `HOST_RSP`/`HOST_RIP`. The Hyper-V run reported host PAT and EFER load controls both false, so those conditional fields were skipped.
 - [x] Allocate a dedicated four-page VM-exit stack and compile an inactive entry stub that saves general-purpose registers and calls a non-returning Rust handler.
+- [x] Add a firmware-independent COM1 serial logger and stream it from the Hyper-V VM to the host console and `run\serial.log` (see section 0).
 
-There is no guest execution, observed VM exit, EPT, or OS boot yet. The VM-exit handler currently spins; the stored host entry addresses have only been read back, not used by a VM exit. Guest RIP/RSP and exit-reason constants exist, but guest state and `VMLAUNCH` are not configured.
+There is no guest execution, observed VM exit, EPT, or OS boot yet. The VM-exit handler is written to print the exit over serial and halt, but has never run; the stored host entry addresses have only been read back, not used by a VM exit. Guest RIP/RSP and exit-reason constants exist, but guest state and `VMLAUNCH` are not configured.
+
+## 0. Debug output that works without firmware
+
+`uefi::println!` calls the firmware console, which is unsafe in the VM-exit handler (interrupts off, arbitrary firmware state) and gone after `ExitBootServices`. Serial output drives the UART directly with `in`/`out`, so it works in both. Background and usage: [docs/SERIAL_LOGGING.md](docs/SERIAL_LOGGING.md).
+
+- [x] Drive the 16550 UART at COM1 (`0x3F8`) from `src/serial.rs`: 115200 8N1, polled, no interrupts. Probe with loopback before enabling output, and bound every wait so a missing UART cannot hang the hypervisor.
+- [x] Provide `serial_print!`/`serial_println!` through `core::fmt` with no allocation, for use in exit context.
+- [x] Route bring-up messages through `log!`, which writes each line to both the firmware console and COM1.
+- [x] Attach COM1 to `\\.\pipe\aleph0-com1` in `run-hyperv.ps1` and stream it with `read-serial.ps1`, which also saves `run\serial.log`. The reader was tested against a local pipe server, not yet against Hyper-V.
+- [ ] Confirm on Hyper-V: the console prints `Serial output enabled on COM1`, and the PowerShell window and `run\serial.log` show the same bring-up lines as the VM console.
+
+**Checkpoint:** A Hyper-V run produces a `run\serial.log` that matches the VM console. Only then rely on serial as the observation path for the first VM exit.
 
 ## 1. Establish a host TSS
 
@@ -43,7 +56,7 @@ There is no guest execution, observed VM exit, EPT, or OS boot yet. The VM-exit 
 ## 3. Launch and observe one guest exit
 
 - [x] Assemble and link an inactive VM-exit entry stub that saves guest general-purpose registers, prepares the UEFI x64 call frame, and calls a non-returning handler. Do not mistake compilation or `HOST_RIP` readback for a tested exit.
-- [ ] Replace the spin-only handler with a deliberate first-exit diagnostic: read `VM_EXIT_REASON`, record it through a mechanism that can be observed, and stop safely. Do not assume UEFI printing is safe in the low-level exit handler; there is no `VMRESUME` path yet.
+- [x] Replace the spin-only handler with a deliberate first-exit diagnostic: read `VM_EXIT_REASON`, record it through a mechanism that can be observed, and stop safely. Do not assume UEFI printing is safe in the low-level exit handler; there is no `VMRESUME` path yet. `vmexit_handler` reads the exit reason (basic reason plus the VM-entry-failure bit), exit qualification, guest RIP, instruction length and the saved guest RAX-RDX, prints them with `serial_println!`, and halts with `cli; hlt`. Written and compiled only; it runs for the first time after `VMLAUNCH`.
 - [ ] After guest memory/state readback and the observable exit path are ready, execute `VMLAUNCH` to enter the tiny guest. `VMLAUNCH` enters the guest for the first time; the guest then executes `VMCALL`, which causes the VM exit.
 - [ ] On instruction failure, distinguish VMfailInvalid, VMfailValid (read `VM_INSTRUCTION_ERROR`), and VM-entry failure reported as a VM exit. Do not treat every return as a successful guest run.
 - [ ] Handle only the expected `VMCALL` at first. Define a controlled stop/observation path; do not blindly `VMRESUME` at the same guest RIP.
@@ -69,7 +82,7 @@ There is no guest execution, observed VM exit, EPT, or OS boot yet. The VM-exit 
 
 - Run `cargo build --target x86_64-unknown-uefi` after each change. It checks compilation, not VM-entry validity.
 - Run `cargo test-host` for the host unit tests of pure logic (RFLAGS decoding, control selection, descriptor encoding). They do not execute VMX instructions.
-- Run `run-hyperv.ps1` from an elevated PowerShell session and inspect the VM console. The runner turns off the named test VM and recreates its ESP VHDX; do not keep irreplaceable data there.
+- Run `run-hyperv.ps1` from an elevated PowerShell session and inspect the VM console and the serial stream in the PowerShell window (also saved to `run\serial.log`). The runner turns off the named test VM and recreates its ESP VHDX; do not keep irreplaceable data there. VM-exit diagnostics appear only on serial.
 - Record observed VMX instruction errors and VM-exit reasons as milestones are reached. QEMU without nested VMX can still test non-VMX diagnostics, but cannot validate `VMLAUNCH`.
 
-Relevant code: `src/main.rs`, `src/vmx/segment.rs`, `src/vmx/vmxon.rs`, `src/vmx/vmcs.rs`, `src/vmx/vmexit.rs`, and `run-hyperv.ps1`.
+Relevant code: `src/main.rs`, `src/serial.rs`, `src/vmx/segment.rs`, `src/vmx/vmxon.rs`, `src/vmx/vmcs.rs`, `src/vmx/vmexit.rs`, `run-hyperv.ps1`, and `read-serial.ps1`.

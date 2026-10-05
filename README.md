@@ -39,7 +39,11 @@ instructions can be unit-tested; that still needs a boot under Hyper-V.
 ```
 
 This turns off and reconfigures the `Aleph0Test` VM and recreates its ESP disk
-under `run/`; keep nothing important there.
+under `run/`; keep nothing important there. It then streams the VM's COM1
+serial output into the PowerShell window and `run\serial.log`
+(`-NoSerial` skips this; `.\read-serial.ps1` reattaches later). VM-exit
+diagnostics only appear there, not on the VM console. See
+[docs/SERIAL_LOGGING.md](docs/SERIAL_LOGGING.md).
 
 **QEMU + OVMF (no VMX):** put `OVMF_CODE.fd` and `OVMF_VARS.fd` from
 [rust-osdev/ovmf-prebuilt](https://github.com/rust-osdev/ovmf-prebuilt) in
@@ -51,8 +55,11 @@ diagnostics that run before VMXON.
 | Path | Purpose |
 | --- | --- |
 | `src/main.rs` | UEFI entry point; drives the bring-up sequence |
+| `src/serial.rs` | COM1 serial logger usable without firmware |
 | `src/vmx/cpuid.rs`, `msr.rs`, `cr.rs` | CPU feature, MSR and control-register access |
 | `src/vmx/host_tables.rs`, `segment.rs` | Host GDT/TSS setup and segmentation state |
 | `src/vmx/vmxon.rs` | Entering VMX root operation |
 | `src/vmx/vmcs.rs` | VMCS lifecycle, field access, controls and host state |
-| `src/vmx/vmexit.rs` | VM-exit stack and entry stub |
+| `src/vmx/vmexit.rs` | VM-exit stack, entry stub and exit diagnostic |
+| `run-hyperv.ps1`, `read-serial.ps1` | Hyper-V test VM runner and serial reader |
+| `docs/` | Background explanations for individual features |

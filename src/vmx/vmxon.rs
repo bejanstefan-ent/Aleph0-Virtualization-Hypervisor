@@ -6,11 +6,11 @@
 //! 2. [`apply_fixed_bits`] — make CR0/CR4 satisfy `IA32_VMX_CR{0,4}_FIXED{0,1}`.
 //!    For each register: `value = (value | fixed0) & fixed1`. VMXON fails
 //!    with VmFailInvalid if this is skipped.
-//! 3. [`VmxonRegion::allocate`] — one 4 KiB page, 4 KiB-aligned, zeroed.
+//! 3. [`VmxOnRegion::allocate`] — one 4 KiB page, 4 KiB-aligned, zeroed.
 //!    `boot::allocate_pages` already guarantees page alignment, and UEFI
 //!    identity-maps memory, so the pointer is also the physical address.
 //! 4. [`vmcs_revision_id`] — bits 0..=30 of `IA32_VMX_BASIC`, written to
-//!    the first 4 bytes of the region via [`VmxonRegion::write_revision_id`].
+//!    the first 4 bytes of the region via [`VmxOnRegion::write_revision_id`].
 //! 5. [`vmxon`] — execute VMXON. The instruction takes a *memory* operand
 //!    holding the 64-bit physical address, so pass a pointer to a local
 //!    `u64`, not the address itself. Then read RFLAGS:

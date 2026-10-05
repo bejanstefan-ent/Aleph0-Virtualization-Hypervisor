@@ -13,11 +13,20 @@
 
 .PARAMETER Release
     Builds the release profile instead of debug.
+
+.PARAMETER PipeName
+    Named pipe COM1 is attached to (without the \\.\pipe\ prefix).
+
+.PARAMETER NoSerial
+    Do not stream COM1 output after starting the VM. COM1 is still attached,
+    so read-serial.ps1 can connect later.
 #>
 param(
     [string]$VMName   = "Aleph0Test",
     [int]$MemoryMB    = 2048,
-    [switch]$Release
+    [switch]$Release,
+    [string]$PipeName = "aleph0-com1",
+    [switch]$NoSerial
 )
 
 # See run.ps1 for why $ErrorActionPreference is not set to "Stop" globally.
@@ -114,6 +123,9 @@ try {
     # Nested virtualization requires static memory.
     Set-VMMemory -VMName $VMName -DynamicMemoryEnabled $false -StartupBytes ($MemoryMB * 1MB) -ErrorAction Stop
     Set-VMProcessor -VMName $VMName -Count 2 -ExposeVirtualizationExtensions $true -ErrorAction Stop
+    # COM1 -> named pipe. Gen 2 VMs have no COM ports in the UI; this is the
+    # only way to attach one. The hypervisor's serial logger writes here.
+    Set-VMComPort -VMName $VMName -Number 1 -Path "\\.\pipe\$PipeName" -ErrorAction Stop
 } catch {
     Write-Error "Setup failed: $_"
     exit 1
@@ -123,3 +135,9 @@ try {
 Write-Host "==> Starting $VMName" -ForegroundColor Cyan
 Start-VM -Name $VMName
 vmconnect.exe localhost $VMName
+
+# 6. Stream COM1. Connect immediately: Hyper-V drops serial output written
+#    while no client is attached, and the firmware reaches our code in seconds.
+if (-not $NoSerial) {
+    & (Join-Path $root "read-serial.ps1") -PipeName $PipeName
+}

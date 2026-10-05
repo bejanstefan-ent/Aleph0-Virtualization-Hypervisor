@@ -5,6 +5,7 @@
 
 use uefi::prelude::*;
 
+mod serial;
 mod vmx;
 use vmx::VmxCapabilities;
 use vmx::host_tables::{GdtError, GdtRegion, TssError, TssRegion};
@@ -13,7 +14,26 @@ use vmx::vmcs::{DesiredControls, VmcsError, VmcsRegion};
 use vmx::vmexit::{VmExitStack, VmExitStackError, VM_EXIT_STACK_SIZE};
 use vmx::vmxon::{VmxOnError, VmxOnRegion};
 
-const TAG: &str = "[Aleph0 Virtualization Hypervisor]";
+/// Prefix for every line this hypervisor prints, on screen and on COM1.
+pub const TAG: &str = "[Aleph0 Virtualization Hypervisor]";
+
+/// Prints a tagged line to both the firmware console and COM1.
+///
+/// The firmware half is only safe from ordinary UEFI context, such as `main`
+/// and the bring-up steps. Code that may run in the VM-exit handler or after
+/// `ExitBootServices` must use `serial_println!` alone.
+macro_rules! log {
+    ($($arg:tt)*) => {
+        crate::log_line(format_args!($($arg)*))
+    };
+}
+
+/// Implementation of [`log!`]. Taking `Arguments` means the caller's
+/// expressions are evaluated once, then formatted once per destination.
+fn log_line(args: core::fmt::Arguments) {
+    uefi::println!("{TAG} {args}");
+    crate::serial_println!("{TAG} {args}");
+}
 
 /// Why bring-up stopped. Each step returns one of these, so the sequence
 /// reads top to bottom with `?` and [`report_error`] prints the outcome.
@@ -79,11 +99,18 @@ struct Hypervisor {
 
 #[cfg_attr(not(test), entry)]
 fn main() -> Status {
-    uefi::println!("{TAG} Initializing UEFI helpers...");
+    // First, so every later line also reaches COM1. Needs no firmware.
+    let serial = serial::init();
+
+    log!("Initializing UEFI helpers...");
 
     uefi::helpers::init().unwrap();
 
-    uefi::println!("{TAG} UEFI helpers initialized successfully.");
+    log!("UEFI helpers initialized successfully.");
+    match serial {
+        Ok(()) => log!("Serial output enabled on COM1 ({:#x}).", serial::COM1),
+        Err(error) => log!("Serial output disabled: {error:?}; console only."),
+    }
 
     // Held until the loop below: the CPU keeps using these regions for as
     // long as it stays in VMX operation, so none may be freed before then.
@@ -110,7 +137,7 @@ fn bring_up() -> Result<Hypervisor, BringUpError> {
     dump_segment_state();
 
     let vmexit_stack = VmExitStack::allocate()?;
-    uefi::println!("{TAG} VM-exit stack allocated: top={:#018x} size={VM_EXIT_STACK_SIZE}.", vmexit_stack.top());
+    log!("VM-exit stack allocated: top={:#018x} size={VM_EXIT_STACK_SIZE}.", vmexit_stack.top());
 
     let (vmxon, vmcs) = bring_up_vmx(&vmexit_stack)?;
 
@@ -128,10 +155,10 @@ fn bring_up() -> Result<Hypervisor, BringUpError> {
 /// loads it with LTR, and records the resulting state for later checks.
 fn activate_host_tables() -> Result<HostTables, BringUpError> {
     let tss = TssRegion::allocate()?;
-    uefi::println!("{TAG} Host TSS allocated at {:#018x}; TR not loaded yet.", tss.base());
+    log!("Host TSS allocated at {:#018x}; TR not loaded yet.", tss.base());
 
     let mut gdt = unsafe { GdtRegion::copy_active() }?;
-    uefi::println!("{TAG} Host GDT copied at {:#018x}.", gdt.base());
+    log!("Host GDT copied at {:#018x}.", gdt.base());
 
     let selector = gdt.append_tss_descriptor(&tss)?;
     if !gdt.verify_tss_descriptor(&tss) {
@@ -141,13 +168,13 @@ fn activate_host_tables() -> Result<HostTables, BringUpError> {
         .prepared_gdtr()
         .filter(|prepared| prepared.base == gdt.base() && prepared.limit == selector + 15)
         .ok_or(GdtError::GdtrPreparationFailed)?;
-    uefi::println!(
-        "{TAG} Host GDT prepared: base={:#018x} limit={:#06x} tr_selector={selector:#06x}.",
+    log!(
+        "Host GDT prepared: base={:#018x} limit={:#06x} tr_selector={selector:#06x}.",
         prepared.base, prepared.limit,
     );
 
     unsafe { gdt.activate(&tss) }?;
-    uefi::println!("{TAG} Host GDT and TSS activated and verified.");
+    log!("Host GDT and TSS activated and verified.");
 
     Ok(HostTables {
         gdtr: prepared,
@@ -164,15 +191,15 @@ fn activate_host_tables() -> Result<HostTables, BringUpError> {
 fn bring_up_vmx(vmexit_stack: &VmExitStack) -> Result<(VmxOnRegion, VmcsRegion), BringUpError> {
     match unsafe { vmx::detect() } {
         VmxCapabilities::Supported => {
-            uefi::println!("{TAG} VMX supported and enabled by firmware.");
+            log!("VMX supported and enabled by firmware.");
         }
         VmxCapabilities::NotSupportedByCpu => return Err(BringUpError::VmxNotSupportedByCpu),
         VmxCapabilities::DisabledByFirmware => return Err(BringUpError::VmxDisabledByFirmware),
     }
 
     let controls = unsafe { vmx::msr::read_vmcs_control_msrs() };
-    uefi::println!(
-        "{TAG} VMX BASIC={:#018x}; true controls={}",
+    log!(
+        "VMX BASIC={:#018x}; true controls={}",
         controls.basic, controls.basic & (1u64 << 55) != 0,
     );
     for (name, value) in [
@@ -181,36 +208,36 @@ fn bring_up_vmx(vmexit_stack: &VmExitStack) -> Result<(VmxOnRegion, VmcsRegion),
         ("exit", controls.exit),
         ("entry", controls.entry),
     ] {
-        uefi::println!(
-            "{TAG} VMX {name}: required={:#010x} allowed={:#010x}",
+        log!(
+            "VMX {name}: required={:#010x} allowed={:#010x}",
             value as u32, (value >> 32) as u32,
         );
     }
 
     let vmxon = unsafe { vmx::vmxon::enter_vmx_root_operation() }?;
-    uefi::println!("{TAG} Entered VMX root operation.");
+    log!("Entered VMX root operation.");
 
     // Only legal now: the VMCS instructions raise #UD outside VMX operation.
     let vmcs = unsafe { VmcsRegion::create_current() }.map_err(vmcs_step("creation"))?;
     unsafe { vmx::vmcs::self_test() }.map_err(vmcs_step("self-test"))?;
-    uefi::println!("{TAG} VMCS self-test passed: VMREAD returned what VMWRITE stored.");
+    log!("VMCS self-test passed: VMREAD returned what VMWRITE stored.");
 
     unsafe { vmx::vmcs::configure_controls(&controls, DesiredControls::minimal_64_bit_guest()) }
         .map_err(vmcs_step("control setup"))?;
-    uefi::println!("{TAG} VMCS controls written and read back successfully.");
+    log!("VMCS controls written and read back successfully.");
 
     unsafe { vmx::vmcs::configure_host_state() }.map_err(vmcs_step("host-state setup"))?;
     let exit_controls = unsafe { vmx::vmcs::vmread(vmx::vmcs::VM_EXIT_CONTROLS) }
         .map_err(vmcs_step("exit-control readback"))?;
-    uefi::println!(
-        "{TAG} VMCS host fields written and read back; host PAT load={} EFER load={}; VM entry not attempted.",
+    log!(
+        "VMCS host fields written and read back; host PAT load={} EFER load={}; VM entry not attempted.",
         exit_controls & vmx::vmcs::VM_EXIT_LOAD_IA32_PAT != 0,
         exit_controls & vmx::vmcs::VM_EXIT_LOAD_IA32_EFER != 0,
     );
 
     unsafe { vmx::vmcs::configure_host_entry(vmexit_stack.top(), vmx::vmexit::entry_address()) }
         .map_err(vmcs_step("host entry address setup"))?;
-    uefi::println!("{TAG} VMCS HOST_RSP/HOST_RIP written and read back; VM entry not attempted.");
+    log!("VMCS HOST_RSP/HOST_RIP written and read back; VM entry not attempted.");
 
     Ok((vmxon, vmcs))
 }
@@ -227,31 +254,31 @@ fn check_host_tables_preserved(expected: &HostTables) {
         && unsafe { vmx::segment::segment_base_from_gdt(&gdtr, tr) } == expected.tss_base;
 
     if same_gdtr && same_idtr && same_tss_base {
-        uefi::println!("{TAG} Host GDTR, TR, TSS base and IDTR preserved after VMX/UEFI calls.");
+        log!("Host GDTR, TR, TSS base and IDTR preserved after VMX/UEFI calls.");
     } else {
-        uefi::println!("{TAG} WARNING: Host descriptor state changed after VMX/UEFI calls.");
-        uefi::println!(
-            "{TAG} Expected GDTR={:?} TR={:#06x} TSS={:#018x} IDTR={:?}",
+        log!("WARNING: Host descriptor state changed after VMX/UEFI calls.");
+        log!(
+            "Expected GDTR={:?} TR={:#06x} TSS={:#018x} IDTR={:?}",
             expected.gdtr, expected.tr, expected.tss_base, expected.idtr,
         );
-        uefi::println!("{TAG} Actual GDTR={gdtr:?} TR={tr:#06x} IDTR={idtr:?} TSS base matches={same_tss_base}");
+        log!("Actual GDTR={gdtr:?} TR={tr:#06x} IDTR={idtr:?} TSS base matches={same_tss_base}");
     }
 }
 
 /// Prints why bring-up stopped.
 fn report_error(error: BringUpError) {
     match error {
-        BringUpError::Tss(error) => uefi::println!("{TAG} Host TSS allocation failed: {error:?}"),
+        BringUpError::Tss(error) => log!("Host TSS allocation failed: {error:?}"),
         // Only this variant comes after LGDT/LTR; every other GdtError is
         // returned before the CPU's tables are touched.
-        BringUpError::Gdt(GdtError::ActivationVerificationFailed) => uefi::println!(
-            "{TAG} Host GDT/TSS activation failed verification; the CPU may already use the new tables."
+        BringUpError::Gdt(GdtError::ActivationVerificationFailed) => log!(
+            "Host GDT/TSS activation failed verification; the CPU may already use the new tables."
         ),
-        BringUpError::Gdt(error) => uefi::println!("{TAG} Host GDT/TSS setup failed: {error:?}; GDTR/TR unchanged."),
-        BringUpError::VmExitStack(error) => uefi::println!("{TAG} VM-exit stack allocation failed: {error:?}"),
-        BringUpError::VmxNotSupportedByCpu => uefi::println!("{TAG} VMX not supported by this CPU."),
-        BringUpError::VmxDisabledByFirmware => uefi::println!("{TAG} VMX supported by CPU but disabled by firmware."),
-        BringUpError::VmxOn(error) => uefi::println!("{TAG} VMXON failed: {error:?}"),
+        BringUpError::Gdt(error) => log!("Host GDT/TSS setup failed: {error:?}; GDTR/TR unchanged."),
+        BringUpError::VmExitStack(error) => log!("VM-exit stack allocation failed: {error:?}"),
+        BringUpError::VmxNotSupportedByCpu => log!("VMX not supported by this CPU."),
+        BringUpError::VmxDisabledByFirmware => log!("VMX supported by CPU but disabled by firmware."),
+        BringUpError::VmxOn(error) => log!("VMXON failed: {error:?}"),
         BringUpError::Vmcs { operation, error } => report_vmcs_error(operation, error),
     }
 }
@@ -259,7 +286,7 @@ fn report_error(error: BringUpError) {
 /// Prints a VMCS failure, decoding the VM-instruction error when one exists.
 fn report_vmcs_error(operation: &str, error: VmcsError) {
     if error != VmcsError::VmFailValid {
-        uefi::println!("{TAG} VMCS {operation} failed: {error:?}");
+        log!("VMCS {operation} failed: {error:?}");
         return;
     }
 
@@ -267,10 +294,10 @@ fn report_vmcs_error(operation: &str, error: VmcsError) {
     match unsafe { vmx::vmcs::vm_instruction_error() } {
         Ok(code) => {
             let name = vmx::vmcs::vm_instruction_error_name(code);
-            uefi::println!("{TAG} VMCS {operation} failed: {name} ({code})");
+            log!("VMCS {operation} failed: {name} ({code})");
         }
         Err(e) => {
-            uefi::println!("{TAG} VMCS {operation} failed: VmFailValid, error unreadable ({e:?})");
+            log!("VMCS {operation} failed: VmFailValid, error unreadable ({e:?})");
         }
     }
 }
@@ -281,24 +308,24 @@ fn report_vmcs_error(operation: &str, error: VmcsError) {
 fn dump_segment_state() {
     let state = unsafe { vmx::segment::read_all() };
 
-    uefi::println!(
-        "{TAG} segments: cs={:#06x} ss={:#06x} ds={:#06x} es={:#06x} fs={:#06x} gs={:#06x} tr={:#06x}",
+    log!(
+        "segments: cs={:#06x} ss={:#06x} ds={:#06x} es={:#06x} fs={:#06x} gs={:#06x} tr={:#06x}",
         state.cs, state.ss, state.ds, state.es, state.fs, state.gs, state.tr,
     );
-    uefi::println!(
-        "{TAG} bases:    fs={:#018x} gs={:#018x} tr={:#018x}",
+    log!(
+        "bases:    fs={:#018x} gs={:#018x} tr={:#018x}",
         state.fs_base, state.gs_base, state.tr_base,
     );
-    uefi::println!(
-        "{TAG} gdtr:     base={:#018x} limit={:#06x}",
+    log!(
+        "gdtr:     base={:#018x} limit={:#06x}",
         state.gdtr.base, state.gdtr.limit,
     );
-    uefi::println!(
-        "{TAG} idtr:     base={:#018x} limit={:#06x}",
+    log!(
+        "idtr:     base={:#018x} limit={:#06x}",
         state.idtr.base, state.idtr.limit,
     );
 
     if state.tr == 0 {
-        uefi::println!("{TAG} WARNING: TR is 0; VM entry would reject this host state.");
+        log!("WARNING: TR is 0; VM entry would reject this host state.");
     }
 }

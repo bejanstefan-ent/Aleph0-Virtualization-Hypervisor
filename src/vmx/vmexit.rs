@@ -10,8 +10,9 @@
 //! No guest is launched yet, so none of this has executed. When it does, the
 //! handler prints the exit over serial and halts; there is no VMRESUME path.
 
-use core::arch::asm;
 use core::ptr::NonNull;
+
+use crate::output::halt_forever;
 
 use super::page::{allocate_zeroed_pages, PAGE_SIZE};
 use super::vmcs::{self, VmcsError};
@@ -158,12 +159,17 @@ fn report_unreadable(name: &str, error: VmcsError) {
 ///
 /// Runs on the VM-exit stack with interrupts off. It may only use things
 /// that need no firmware: VMREAD (the VMCS is still current) and the serial
-/// port. `uefi::println!` must not be called here.
+/// port. `uefi::println!` must not be called here; `log!` and the panic
+/// handler skip the console once the phase below is set.
 ///
 /// Once VMRESUME exists, this becomes a dispatcher that handles the exit,
 /// advances guest RIP by VM_EXIT_INSTRUCTION_LEN, and resumes the guest.
 #[unsafe(no_mangle)]
 extern "efiapi" fn vmexit_handler(frame: *const RegisterFrame) -> ! {
+    // First, so every line below (and any panic) skips the firmware console.
+    // Never switched back: after VMLAUNCH the host runs only in exit handlers.
+    crate::output::set_phase(crate::output::Phase::VmExit);
+
     let tag = crate::TAG;
 
     if let Some(raw) = read_or_report("VM_EXIT_REASON", vmcs::VM_EXIT_REASON) {
@@ -193,11 +199,7 @@ extern "efiapi" fn vmexit_handler(frame: *const RegisterFrame) -> ! {
     );
 
     crate::serial_println!("{tag} VM exit: halting; there is no VMRESUME path yet.");
-    loop {
-        // IF is already 0 after a VM exit; CLI keeps that true regardless.
-        // HLT then waits forever, except for NMIs, after which we halt again.
-        unsafe { asm!("cli", "hlt", options(nomem, nostack)) };
-    }
+    halt_forever();
 }
 
 unsafe extern "C" {

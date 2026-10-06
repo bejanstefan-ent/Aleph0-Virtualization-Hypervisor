@@ -6,6 +6,7 @@
 use uefi::prelude::*;
 
 mod serial;
+mod output;
 mod vmx;
 use vmx::VmxCapabilities;
 use vmx::host_tables::{GdtError, GdtRegion, TssError, TssRegion};
@@ -17,22 +18,15 @@ use vmx::vmxon::{VmxOnError, VmxOnRegion};
 /// Prefix for every line this hypervisor prints, on screen and on COM1.
 pub const TAG: &str = "[Aleph0 Virtualization Hypervisor]";
 
-/// Prints a tagged line to both the firmware console and COM1.
+/// Prints a tagged line to COM1, and to the firmware console while still in
+/// boot services.
 ///
-/// The firmware half is only safe from ordinary UEFI context, such as `main`
-/// and the bring-up steps. Code that may run in the VM-exit handler or after
-/// `ExitBootServices` must use `serial_println!` alone.
+/// Safe in every context: outside the boot-services phase (see
+/// `output::Phase`) the console half is skipped and only serial is written.
 macro_rules! log {
     ($($arg:tt)*) => {
-        crate::log_line(format_args!($($arg)*))
+        crate::output::log_line(format_args!($($arg)*))
     };
-}
-
-/// Implementation of [`log!`]. Taking `Arguments` means the caller's
-/// expressions are evaluated once, then formatted once per destination.
-fn log_line(args: core::fmt::Arguments) {
-    uefi::println!("{TAG} {args}");
-    crate::serial_println!("{TAG} {args}");
 }
 
 /// Why bring-up stopped. Each step returns one of these, so the sequence

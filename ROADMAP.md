@@ -15,6 +15,7 @@ This is a learning-oriented Intel VT-x hypervisor booted as a UEFI application. 
 - [x] Write/read back host selectors, CRs, segment/table bases, SYSENTER state, and `HOST_RSP`/`HOST_RIP`. The Hyper-V run reported host PAT and EFER load controls both false, so those conditional fields were skipped.
 - [x] Allocate a dedicated four-page VM-exit stack and compile an inactive entry stub that saves general-purpose registers and calls a non-returning Rust handler.
 - [x] Add a firmware-independent COM1 serial logger and stream it from the Hyper-V VM to the host console and `run\serial.log` (see section 0).
+- [x] Replace the `uefi` panic handler with one that needs no firmware, and gate console output by an output phase (see section 0b).
 
 There is no guest execution, observed VM exit, EPT, or OS boot yet. The VM-exit handler is written to print the exit over serial and halt, but has never run; the stored host entry addresses have only been read back, not used by a VM exit. Guest RIP/RSP and exit-reason constants exist, but guest state and `VMLAUNCH` are not configured.
 
@@ -41,8 +42,8 @@ After `ExitBootServices` the OS runs as Aleph0's guest, Aleph0 only runs during 
 
 Before the first `VMLAUNCH` (section 3):
 
-- [ ] Replace the `uefi` panic handler with Aleph0's own and drop the crate's `panic_handler` feature. Always print the panic over serial, print on the console only in ordinary boot-services context, then halt with `cli; hlt`. No `stall`, no `runtime::reset`, no other firmware calls.
-- [ ] Track the output phase in one global (boot services, inside the VM-exit handler, runtime after `ExitBootServices`). `log!` writes to the console only in the boot-services phase and to serial in every phase.
+- [x] Replace the `uefi` panic handler with Aleph0's own and drop the crate's `panic_handler` feature. Always print the panic over serial, print on the console only in ordinary boot-services context, then halt with `cli; hlt`. No `stall`, no `runtime::reset`, no other firmware calls. Done in `src/output.rs`; a recursion guard halts on a nested panic. On Hyper-V a test panic in `main` printed on the console and in `run\serial.log`, and the VM stayed halted instead of resetting.
+- [x] Track the output phase in one global (boot services, inside the VM-exit handler, runtime after `ExitBootServices`). `log!` writes to the console only in the boot-services phase and to serial in every phase. `output::Phase`; `vmexit_handler` sets `VmExit` first. On Hyper-V a panic after setting `VmExit` from `main` reached `run\serial.log` only, not the console, and the VM stayed halted. A panic in a real exit is first exercised at `VMLAUNCH`.
 
 At the `ExitBootServices` milestone (section 5):
 
@@ -92,7 +93,7 @@ At the virtual-device milestone (section 5):
 
 - [x] Assemble and link an inactive VM-exit entry stub that saves guest general-purpose registers, prepares the UEFI x64 call frame, and calls a non-returning handler. Do not mistake compilation or `HOST_RIP` readback for a tested exit.
 - [x] Replace the spin-only handler with a deliberate first-exit diagnostic: read `VM_EXIT_REASON`, record it through a mechanism that can be observed, and stop safely. Do not assume UEFI printing is safe in the low-level exit handler; there is no `VMRESUME` path yet. `vmexit_handler` reads the exit reason (basic reason plus the VM-entry-failure bit), exit qualification, guest RIP, instruction length and the saved guest RAX-RDX, prints them with `serial_println!`, and halts with `cli; hlt`. Written and compiled only; it runs for the first time after `VMLAUNCH`.
-- [ ] Before the first launch, finish the "Before the first `VMLAUNCH`" items in section 0b (own panic handler, output phase), so a panic in exit context never calls firmware.
+- [x] Before the first launch, finish the "Before the first `VMLAUNCH`" items in section 0b (own panic handler, output phase), so a panic in exit context never calls firmware.
 - [ ] After guest memory/state readback and the observable exit path are ready, execute `VMLAUNCH` to enter the tiny guest. `VMLAUNCH` enters the guest for the first time; the guest then executes `VMCALL`, which causes the VM exit.
 - [ ] On instruction failure, distinguish VMfailInvalid, VMfailValid (read `VM_INSTRUCTION_ERROR`), and VM-entry failure reported as a VM exit. Do not treat every return as a successful guest run.
 - [ ] Handle only the expected `VMCALL` at first. Define a controlled stop/observation path; do not blindly `VMRESUME` at the same guest RIP.
@@ -121,4 +122,4 @@ At the virtual-device milestone (section 5):
 - Run `run-hyperv.ps1` from an elevated PowerShell session and inspect the VM console and the serial stream in the PowerShell window (also saved to `run\serial.log`). The runner turns off the named test VM and recreates its ESP VHDX; do not keep irreplaceable data there. VM-exit diagnostics appear only on serial.
 - Record observed VMX instruction errors and VM-exit reasons as milestones are reached. QEMU without nested VMX can still test non-VMX diagnostics, but cannot validate `VMLAUNCH`.
 
-Relevant code: `src/main.rs`, `src/serial.rs`, `src/vmx/segment.rs`, `src/vmx/vmxon.rs`, `src/vmx/vmcs.rs`, `src/vmx/vmexit.rs`, `run-hyperv.ps1`, and `read-serial.ps1`.
+Relevant code: `src/main.rs`, `src/serial.rs`, `src/output.rs`, `src/vmx/segment.rs`, `src/vmx/vmxon.rs`, `src/vmx/vmcs.rs`, `src/vmx/vmexit.rs`, `run-hyperv.ps1`, and `read-serial.ps1`.

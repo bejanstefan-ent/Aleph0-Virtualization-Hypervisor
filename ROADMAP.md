@@ -19,6 +19,8 @@ This is a learning-oriented Intel VT-x hypervisor booted as a UEFI application. 
 
 There is no guest execution, observed VM exit, EPT, or OS boot yet. The VM-exit handler is written to print the exit over serial and halt, but has never run; the stored host entry addresses have only been read back, not used by a VM exit. Guest RIP/RSP and exit-reason constants exist, but guest state and `VMLAUNCH` are not configured.
 
+**Next:** section 2, guest side. Add `src/vmx/guest.rs` owning a guest code page (first instruction `VMCALL`) and a separate guest stack page, check that the current page tables (guest CR3 = host CR3, no EPT) map the code page executable and the stack page writable, then write the guest-state fields and read them back. After that comes section 3: the first `VMLAUNCH` and the `VMCALL` exit (reason 18) on serial.
+
 ## 0. Debug output that works without firmware
 
 `uefi::println!` calls the firmware console, which is unsafe in the VM-exit handler (interrupts off, arbitrary firmware state) and gone after `ExitBootServices`. Serial output drives the UART directly with `in`/`out`, so it works in both. Background and usage: [docs/SERIAL_LOGGING.md](docs/SERIAL_LOGGING.md).

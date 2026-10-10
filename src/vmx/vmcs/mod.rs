@@ -19,7 +19,7 @@
 //!    even on a freshly zeroed page.
 //! 3. [`VmcsRegion::vmptrld`] — make it the *current* VMCS. From here on
 //!    [`vmread`]/[`vmwrite`] act on it implicitly, with no address operand.
-//! 4. [`vmwrite`] the fields, then (a later step) VMLAUNCH.
+//! 4. [`vmwrite`] the fields, then [`launch`] (VMLAUNCH).
 //!
 //! [`VmcsRegion::create_current`] runs steps 1-3.
 //!
@@ -321,6 +321,22 @@ pub unsafe fn configure_controls(capabilities: &VmcsControlMsrs, desired: Desire
         }
         if vmread(VM_ENTRY_CONTROLS)? != entry as u64 {
             return Err(VmcsError::ControlReadbackMismatch);
+        }
+
+        // VM entry checks these fields, and VMCLEAR does not guarantee that
+        // a fresh VMCS holds zeros in them, so write the zeros explicitly:
+        // no CR3 targets, no MSR load/store lists, no event injection.
+        for field in [
+            CR3_TARGET_COUNT,
+            VM_EXIT_MSR_STORE_COUNT,
+            VM_EXIT_MSR_LOAD_COUNT,
+            VM_ENTRY_MSR_LOAD_COUNT,
+            VM_ENTRY_INTERRUPTION_INFO,
+        ] {
+            vmwrite(field, 0)?;
+            if vmread(field)? != 0 {
+                return Err(VmcsError::ControlReadbackMismatch);
+            }
         }
     }
 

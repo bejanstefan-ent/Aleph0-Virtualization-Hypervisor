@@ -210,7 +210,10 @@ extern "efiapi" fn vmexit_handler(frame: *const RegisterFrame) -> ! {
         crate::serial_println!("{tag} VM exit: guest rip={rip:#018x} instruction length={length}");
     }
 
-    // The stub pushed these just below HOST_RSP; they are the guest's values.
+    // The stub pushed these just below HOST_RSP; after a normal exit they are
+    // the guest's values. After a VM-entry failure (exit reason bit 31) the
+    // guest never ran, so they are the host's own values left over from
+    // VMLAUNCH, not the guest's.
     let frame = unsafe { &*frame };
     crate::serial_println!(
         "{tag} VM exit: guest rax={:#018x} rbx={:#018x} rcx={:#018x} rdx={:#018x}",
@@ -272,5 +275,21 @@ mod tests {
     fn entry_failure_is_never_the_expected_first_exit() {
         let invalid_guest_state = ExitReason { basic: 33, entry_failure: true };
         assert!(!is_expected_first_exit(invalid_guest_state, u64::from(GUEST_MARKER)));
+    }
+
+    #[test]
+    fn entry_failure_alone_rules_out_the_expected_first_exit() {
+        // Right basic reason and marker; only the entry-failure bit differs
+        // from the expected exit.
+        let failed_vmcall = ExitReason { basic: 18, entry_failure: true };
+        assert!(!is_expected_first_exit(failed_vmcall, u64::from(GUEST_MARKER)));
+    }
+
+    #[test]
+    fn other_reason_alone_rules_out_the_expected_first_exit() {
+        // Marker present and no entry failure; only the basic reason (CPUID)
+        // differs from the expected exit.
+        let cpuid_exit = ExitReason { basic: 10, entry_failure: false };
+        assert!(!is_expected_first_exit(cpuid_exit, u64::from(GUEST_MARKER)));
     }
 }

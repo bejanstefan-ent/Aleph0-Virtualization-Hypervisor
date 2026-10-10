@@ -48,6 +48,20 @@ struct HostTables {
     idtr: DescriptorTable,
 }
 
+// The CPU keeps using these pages for as long as it is in VMX operation,
+// including after `run` returns an error. Freeing them on drop would hand
+// memory the CPU still uses back to UEFI, so none of them may implement
+// `Drop`; this turns adding a `Drop` impl (or a field that needs dropping)
+// into a compile error.
+const _: () = assert!(
+    !core::mem::needs_drop::<TssRegion>()
+        && !core::mem::needs_drop::<GdtRegion>()
+        && !core::mem::needs_drop::<VmExitStack>()
+        && !core::mem::needs_drop::<GuestMemory>()
+        && !core::mem::needs_drop::<VmxOnRegion>()
+        && !core::mem::needs_drop::<VmcsRegion>()
+);
+
 /// Activates the host tables, enters VMX operation, prepares the VMCS, and
 /// launches the guest.
 ///
@@ -76,9 +90,10 @@ pub fn run() -> Result<Infallible, BringUpError> {
     let mappings = unsafe { guest.check_mappings() }?;
     report::guest_mappings(&guest, &mappings);
 
-    // Named, not `_`, so both live to the end of this function: the CPU
-    // uses the VMXON region and the VMCS for as long as it is in VMX
-    // operation.
+    // Named, not `_`, so the values are not dropped early. Dropping frees
+    // nothing anyway: the assertion above guarantees that none of the region
+    // types implement `Drop`, and the CPU uses the VMXON region and the VMCS
+    // for as long as it is in VMX operation.
     let (_vmxon, _vmcs) = bring_up_vmx(&vmexit_stack, &guest)?;
 
     check_host_tables_preserved(&host_tables);

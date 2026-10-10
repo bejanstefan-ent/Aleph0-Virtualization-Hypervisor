@@ -59,7 +59,8 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 /// Stops this CPU permanently, with interrupts disabled.
 ///
 /// Used wherever execution must end without firmware help: after a panic,
-/// and at the end of the first-exit diagnostic in `vmx::vmexit`.
+/// and at the end of the VM-exit handler and of `vmresume_failed` in
+/// `vmx::vmexit`.
 ///
 /// * `CLI` clears RFLAGS.IF, so maskable interrupts (timer, devices) are no
 ///   longer delivered. During boot services UEFI runs with interrupts on and

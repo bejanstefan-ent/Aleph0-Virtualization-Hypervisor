@@ -75,6 +75,15 @@ struct RegisterFrame {
     r15: u64,
 }
 
+// The entry stub pushes r15 first and rax last, so rax ends up at the lowest
+// address. Tie the struct layout to that order, so reordering a field or a
+// push breaks the build instead of silently mixing up guest registers.
+const _: () = {
+    assert!(core::mem::size_of::<RegisterFrame>() == 15 * 8);
+    assert!(core::mem::offset_of!(RegisterFrame, rax) == 0);
+    assert!(core::mem::offset_of!(RegisterFrame, r15) == 14 * 8);
+};
+
 // Every exit enters here with RSP = HOST_RSP, the top of the exit stack, so
 // the stack starts empty on each exit and does not grow across exits.
 //
@@ -84,8 +93,13 @@ struct RegisterFrame {
 // After the 15 pops RSP is HOST_RSP again, so the failure path needs only
 // the 32 bytes of shadow space.
 //
-// Only the 15 general-purpose registers are saved. The handler may change
-// XMM0-XMM5 (caller-saved in this ABI); this guest does not use them.
+// Only the 15 general-purpose registers are saved, because nothing here
+// touches vector state: the x86_64-unknown-uefi target is soft-float with
+// MMX/SSE disabled (only `fxsr` is among its vector features), so the handler
+// and `core::fmt` never use x87, XMM or MXCSR. If SSE target features are ever
+// enabled, the handler would clobber the guest's vector registers, and this
+// stub would have to save them (for example with FXSAVE/FXRSTOR) before an OS
+// guest can run.
 core::arch::global_asm!(
     r#"
     .globl vmexit_entry
@@ -304,8 +318,9 @@ extern "efiapi" fn vmexit_handler(frame: *const RegisterFrame) {
 
     // The stub pushed these just below HOST_RSP; after a normal exit they are
     // the guest's values. After a VM-entry failure (exit reason bit 31) the
-    // guest never ran, so they are the host's own values left over from
-    // VMLAUNCH, not the guest's.
+    // guest never ran, so they are whatever was live when entry was attempted:
+    // the host's registers for VMLAUNCH, or the restored guest registers
+    // (the previous exit's) for VMRESUME. Either way, not this exit's guest.
     let frame = unsafe { &*frame };
     crate::serial_println!(
         "{tag} VM exit #{number}: guest rax={:#018x} rbx={:#018x} rcx={:#018x} rdx={:#018x}",

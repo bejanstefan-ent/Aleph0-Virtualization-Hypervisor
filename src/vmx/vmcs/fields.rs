@@ -31,6 +31,7 @@ pub const EXCEPTION_BITMAP: u32 = 0x4004;
 /// set, a guest #PF exits only if (error code & mask) == match, so 0 and 0
 /// make every #PF exit.
 pub const PAGE_FAULT_ERROR_CODE_MASK: u32 = 0x4006;
+/// See [`PAGE_FAULT_ERROR_CODE_MASK`].
 pub const PAGE_FAULT_ERROR_CODE_MATCH: u32 = 0x4008;
 /// CR3-target count: how many CR3-target values are valid; VM entry requires
 /// at most 4.

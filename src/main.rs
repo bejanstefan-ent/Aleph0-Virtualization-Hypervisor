@@ -43,8 +43,9 @@ fn main() -> Status {
     }
 
     // On success, bring-up ends in VMLAUNCH and never comes back: the
-    // guest's first VM exit goes to the exit handler, which reports over
-    // serial and halts. So the only way back here is an error. `Ok` holds
+    // guest's VM exits go to the exit handler, which reports each exit over
+    // serial, resumes the guest after its first VMCALL, and halts after the
+    // last planned exit. So the only way back here is an error. `Ok` holds
     // `Infallible`, which has no values, so this pattern always matches.
     let Err(error) = bring_up::run();
     bring_up::report_error(error);

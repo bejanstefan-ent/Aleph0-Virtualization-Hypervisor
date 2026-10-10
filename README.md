@@ -66,4 +66,4 @@ diagnostics that run before VMXON.
 | `src/vmx/vmcs/mod.rs`, `fields.rs` | VMCS lifecycle, field access, controls and host state; every field encoding |
 | `src/vmx/vmexit.rs` | VM-exit stack, entry stub and exit diagnostic |
 | `run-hyperv.ps1`, `read-serial.ps1` | Hyper-V test VM runner and serial reader |
-| `docs/` | Background explanations: [SERIAL_LOGGING.md](docs/SERIAL_LOGGING.md) (serial logger, beginner walkthrough), [PORT_IO.md](docs/PORT_IO.md) (`in`/`out` and the I/O port space) |
+| `docs/` | Background explanations: [SERIAL_LOGGING.md](docs/SERIAL_LOGGING.md) (serial logger, beginner walkthrough), [PORT_IO.md](docs/PORT_IO.md) (`in`/`out` and the I/O port space), [PAGE_TABLE_WALK.md](docs/PAGE_TABLE_WALK.md) (page tables and how Aleph0 walks them) |

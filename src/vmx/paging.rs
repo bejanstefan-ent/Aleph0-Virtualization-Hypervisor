@@ -24,6 +24,8 @@
 //! function, so it can be tested on the host with fake tables.
 //! [`walk_current`] runs it on the live CR3.
 //!
+//! A longer walkthrough with more examples is in `docs/PAGE_TABLE_WALK.md`.
+//!
 //! # Why the pieces are 12 and 9 bits
 //!
 //! A page is 4096 = 2^12 bytes, so 12 bits pick a byte inside it. A table

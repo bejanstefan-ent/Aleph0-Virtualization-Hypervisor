@@ -10,8 +10,9 @@
 //! * the **selector** — an index into the GDT, held in CS/SS/DS/ES/FS/GS/TR;
 //! * the **base** — the real 64-bit start address. Only FS, GS and TR matter
 //!   in long mode; the rest are architecturally 0.
-//! * the **limit** and **access rights** — needed for guest state later, not
-//!   for host state.
+//! * the **limit** and **access rights** — needed for guest state, not for
+//!   host state. They are decoded from the segment's GDT descriptor by
+//!   [`descriptor_limit`] and [`descriptor_access_rights`].
 //!
 //! Host state has two extra rules the CPU enforces at VM entry, both common
 //! causes of "invalid host state" (error 8):
@@ -255,6 +256,76 @@ pub unsafe fn segment_base_from_gdt(
     }
 }
 
+// An 8-byte code/data descriptor, as a little-endian u64. The base and limit
+// are scattered for backwards compatibility with the 286:
+//
+//  63    56 55 54 53 52 51  48 47 46 45 44 43  40 39             16 15       0
+// ┌────────┬──┬──┬──┬───┬─────┬──┬─────┬──┬──────┬─────────────────┬──────────┐
+// │base    │G │D │L │AVL│limit│P │ DPL │S │ type │ base 23:0       │limit 15:0│
+// │31:24   │  │/B│  │   │19:16│  │     │  │      │                 │          │
+// └────────┴──┴──┴──┴───┴─────┴──┴─────┴──┴──────┴─────────────────┴──────────┘
+//
+// The VMCS stores access rights as bits 55:52 and 47:40 of this, packed
+// together with the limit bits removed:
+//
+//  31     17  16     15 14 13 12  11  8  7  6 5  4  3   0
+// ┌─────────┬────────┬──┬──┬──┬───┬─────┬──┬───┬──┬──────┐
+// │reserved │unusable│G │D │L │AVL│ res │P │DPL│S │ type │
+// └─────────┴────────┴──┴──┴──┴───┴─────┴──┴───┴──┴──────┘
+
+/// VMCS access-rights bit 16: the segment register is unusable, as after
+/// loading a null selector. VM entry then ignores the other bits.
+pub const ACCESS_RIGHTS_UNUSABLE: u32 = 1 << 16;
+
+/// Descriptor bit 55 (G): the limit counts 4 KiB units, not bytes.
+const DESCRIPTOR_GRANULARITY: u64 = 1 << 55;
+
+/// Base bits 31:0 of an 8-byte descriptor.
+///
+/// Enough for CS, SS, DS and ES, whose bases are 32-bit (and ignored in
+/// 64-bit mode). FS and GS take their 64-bit base from MSRs instead; TR
+/// needs [`segment_base_from_gdt`], since a TSS descriptor is 16 bytes.
+pub fn descriptor_base(descriptor: u64) -> u64 {
+    ((descriptor >> 16) & 0xFF_FFFF) | ((descriptor >> 32) & 0xFF00_0000)
+}
+
+/// The segment limit in bytes, as the VMCS wants it.
+///
+/// The descriptor stores 20 bits. With G = 1 they count 4 KiB pages, so
+/// the byte limit is `raw * 4096 + 4095`: 0xFFFFF becomes 0xFFFF_FFFF.
+pub fn descriptor_limit(descriptor: u64) -> u32 {
+    let raw = (descriptor & 0xFFFF) as u32 | ((descriptor >> 32) as u32 & 0xF_0000);
+    if descriptor & DESCRIPTOR_GRANULARITY != 0 {
+        (raw << 12) | 0xFFF
+    } else {
+        raw
+    }
+}
+
+/// The access rights in VMCS format: descriptor bits 47:40 become bits 7:0,
+/// descriptor bits 55:52 become bits 15:12, and the limit bits in between
+/// (11:8 here) are cleared, since VM entry requires them to be 0.
+pub fn descriptor_access_rights(descriptor: u64) -> u32 {
+    (descriptor >> 40) as u32 & 0xF0FF
+}
+
+/// Reads the 8-byte descriptor `selector` points at.
+///
+/// Returns `None` for a null selector, an LDT selector (TI = 1), or one
+/// whose descriptor would extend past the GDT limit.
+///
+/// # Safety
+///
+/// `gdt` must describe a live, readable GDT through its reported limit.
+pub unsafe fn read_descriptor(gdt: &DescriptorTable, selector: u16) -> Option<u64> {
+    // The low 3 bits are RPL and TI; the rest is the byte offset.
+    let offset = (selector & !0b111) as usize;
+    if selector & 0x4 != 0 || offset == 0 || offset + 8 > gdt.limit as usize + 1 {
+        return None;
+    }
+    Some(unsafe { ((gdt.base + offset as u64) as *const u64).read_unaligned() })
+}
+
 /// Everything about the current segmentation state, for printing or for
 /// filling in the VMCS.
 #[derive(Debug, Clone, Copy)]
@@ -335,5 +406,56 @@ mod tests {
         let gdt = table(&gdt);
         assert_eq!(unsafe { segment_base_from_gdt(&gdt, 0x10) }, 0x1234_5678);
         assert_eq!(unsafe { segment_base_from_gdt(&gdt, 0x13) }, 0x1234_5678);
+    }
+
+    /// The usual flat 64-bit code descriptor: base 0, limit 0xFFFFF with
+    /// G = 1, L = 1, present, DPL 0, execute/read, accessed.
+    const FLAT_CODE_64: u64 = 0x00AF_9B00_0000_FFFF;
+    /// The usual flat data descriptor: G = 1, D/B = 1, read/write, accessed.
+    const FLAT_DATA: u64 = 0x00CF_9300_0000_FFFF;
+
+    #[test]
+    fn flat_code_descriptor_decodes() {
+        assert_eq!(descriptor_base(FLAT_CODE_64), 0);
+        assert_eq!(descriptor_limit(FLAT_CODE_64), 0xFFFF_FFFF);
+        // G=1 L=1 | P=1 DPL=0 S=1 type=0xB
+        assert_eq!(descriptor_access_rights(FLAT_CODE_64), 0xA09B);
+    }
+
+    #[test]
+    fn flat_data_descriptor_decodes() {
+        assert_eq!(descriptor_limit(FLAT_DATA), 0xFFFF_FFFF);
+        // G=1 D/B=1 | P=1 DPL=0 S=1 type=0x3
+        assert_eq!(descriptor_access_rights(FLAT_DATA), 0xC093);
+    }
+
+    #[test]
+    fn scattered_base_and_byte_limit_decode() {
+        // base 0x1234_5678, limit 0x1_2345 with G=0, P S type=0x3.
+        let descriptor = 0x1201_9334_5678_2345;
+        assert_eq!(descriptor_base(descriptor), 0x1234_5678);
+        assert_eq!(descriptor_limit(descriptor), 0x1_2345);
+        // Limit bits 19:16 sit between the two access-rights halves; they
+        // must not leak into access-rights bits 11:8.
+        assert_eq!(descriptor_access_rights(descriptor), 0x0093);
+    }
+
+    #[test]
+    fn read_descriptor_rejects_null_ldt_and_out_of_range() {
+        let gdt = [0xFFu8; 24];
+        let gdt = table(&gdt);
+        assert_eq!(unsafe { read_descriptor(&gdt, 0x00) }, None);
+        assert_eq!(unsafe { read_descriptor(&gdt, 0x03) }, None, "null with RPL 3");
+        assert_eq!(unsafe { read_descriptor(&gdt, 0x0C) }, None, "TI=1 names the LDT");
+        assert_eq!(unsafe { read_descriptor(&gdt, 0x18) }, None, "past the limit");
+    }
+
+    #[test]
+    fn read_descriptor_ignores_rpl() {
+        let mut gdt = [0u8; 24];
+        gdt[0x10..0x18].copy_from_slice(&FLAT_DATA.to_le_bytes());
+        let gdt = table(&gdt);
+        assert_eq!(unsafe { read_descriptor(&gdt, 0x10) }, Some(FLAT_DATA));
+        assert_eq!(unsafe { read_descriptor(&gdt, 0x13) }, Some(FLAT_DATA));
     }
 }

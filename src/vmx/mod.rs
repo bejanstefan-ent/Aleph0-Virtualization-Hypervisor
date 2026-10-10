@@ -22,6 +22,7 @@ pub mod vmxon;
 pub mod vmcs;
 pub mod vmexit;
 pub mod guest;
+pub mod guest_state;
 pub mod segment;
 pub mod host_tables;
 pub mod page;

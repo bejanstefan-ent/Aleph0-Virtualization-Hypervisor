@@ -60,6 +60,11 @@ pub const VM_EXIT_LOAD_IA32_PAT: u64 = 1 << 19;
 pub const VM_EXIT_LOAD_IA32_EFER: u64 = 1 << 21;
 /// VM-entry controls (32-bit VMCS field).
 pub const VM_ENTRY_CONTROLS: u32 = 0x4012;
+/// VM-entry control bits that load guest PAT and EFER from the VMCS. When a
+/// bit is 0, the guest keeps the value the CPU already has, and the matching
+/// guest field may not even exist.
+pub const VM_ENTRY_LOAD_IA32_PAT: u64 = 1 << 14;
+pub const VM_ENTRY_LOAD_IA32_EFER: u64 = 1 << 15;
 
 const HOST_ADDRESS_SPACE_SIZE: u32 = 1 << 9;
 const IA32E_GUEST_MODE: u32 = 1 << 9;
@@ -96,12 +101,84 @@ pub const VM_EXIT_INSTRUCTION_LEN: u32 = 0x440C;
 /// (natural width), e.g. the faulting address for an EPT violation.
 pub const EXIT_QUALIFICATION: u32 = 0x6400;
 
+/// Guest segment selectors (16-bit VMCS fields).
+pub const GUEST_ES_SELECTOR: u32 = 0x0800;
+pub const GUEST_CS_SELECTOR: u32 = 0x0802;
+pub const GUEST_SS_SELECTOR: u32 = 0x0804;
+pub const GUEST_DS_SELECTOR: u32 = 0x0806;
+pub const GUEST_FS_SELECTOR: u32 = 0x0808;
+pub const GUEST_GS_SELECTOR: u32 = 0x080A;
+pub const GUEST_LDTR_SELECTOR: u32 = 0x080C;
+pub const GUEST_TR_SELECTOR: u32 = 0x080E;
+
+/// Guest IA32_DEBUGCTL, PAT and EFER (64-bit VMCS fields). PAT and EFER
+/// exist only on CPUs that support the matching VM-entry load controls.
+pub const GUEST_IA32_DEBUGCTL: u32 = 0x2802;
+pub const GUEST_IA32_PAT: u32 = 0x2804;
+pub const GUEST_IA32_EFER: u32 = 0x2806;
+
+/// Guest segment limits (32-bit VMCS fields).
+pub const GUEST_ES_LIMIT: u32 = 0x4800;
+pub const GUEST_CS_LIMIT: u32 = 0x4802;
+pub const GUEST_SS_LIMIT: u32 = 0x4804;
+pub const GUEST_DS_LIMIT: u32 = 0x4806;
+pub const GUEST_FS_LIMIT: u32 = 0x4808;
+pub const GUEST_GS_LIMIT: u32 = 0x480A;
+pub const GUEST_LDTR_LIMIT: u32 = 0x480C;
+pub const GUEST_TR_LIMIT: u32 = 0x480E;
+pub const GUEST_GDTR_LIMIT: u32 = 0x4810;
+pub const GUEST_IDTR_LIMIT: u32 = 0x4812;
+
+/// Guest segment access rights (32-bit VMCS fields), in the format of
+/// [`super::segment::descriptor_access_rights`].
+pub const GUEST_ES_ACCESS_RIGHTS: u32 = 0x4814;
+pub const GUEST_CS_ACCESS_RIGHTS: u32 = 0x4816;
+pub const GUEST_SS_ACCESS_RIGHTS: u32 = 0x4818;
+pub const GUEST_DS_ACCESS_RIGHTS: u32 = 0x481A;
+pub const GUEST_FS_ACCESS_RIGHTS: u32 = 0x481C;
+pub const GUEST_GS_ACCESS_RIGHTS: u32 = 0x481E;
+pub const GUEST_LDTR_ACCESS_RIGHTS: u32 = 0x4820;
+pub const GUEST_TR_ACCESS_RIGHTS: u32 = 0x4822;
+
+/// Guest interruptibility state (32-bit): 0 = no blocking by STI, MOV SS,
+/// SMI or NMI.
+pub const GUEST_INTERRUPTIBILITY_STATE: u32 = 0x4824;
+/// Guest activity state (32-bit): 0 = active, as opposed to HLT, shutdown
+/// or wait-for-SIPI.
+pub const GUEST_ACTIVITY_STATE: u32 = 0x4826;
+/// Guest SYSENTER code selector (32-bit VMCS field).
+pub const GUEST_IA32_SYSENTER_CS: u32 = 0x482A;
+
+/// Guest control registers (natural-width VMCS fields).
+pub const GUEST_CR0: u32 = 0x6800;
+pub const GUEST_CR3: u32 = 0x6802;
+pub const GUEST_CR4: u32 = 0x6804;
+
+/// Guest segment and descriptor-table bases (natural-width VMCS fields).
+pub const GUEST_ES_BASE: u32 = 0x6806;
+pub const GUEST_CS_BASE: u32 = 0x6808;
+pub const GUEST_SS_BASE: u32 = 0x680A;
+pub const GUEST_DS_BASE: u32 = 0x680C;
+pub const GUEST_FS_BASE: u32 = 0x680E;
+pub const GUEST_GS_BASE: u32 = 0x6810;
+pub const GUEST_LDTR_BASE: u32 = 0x6812;
+pub const GUEST_TR_BASE: u32 = 0x6814;
+pub const GUEST_GDTR_BASE: u32 = 0x6816;
+pub const GUEST_IDTR_BASE: u32 = 0x6818;
+
+/// Guest DR7 (natural width), loaded when "load debug controls" is set.
+pub const GUEST_DR7: u32 = 0x681A;
 /// Guest RSP (natural width).
 pub const GUEST_RSP: u32 = 0x681C;
 /// Guest RIP (natural width).
 pub const GUEST_RIP: u32 = 0x681E;
 /// Guest RFLAGS (natural width).
 pub const GUEST_RFLAGS: u32 = 0x6820;
+/// Guest pending debug exceptions (natural width): 0 = none pending.
+pub const GUEST_PENDING_DEBUG_EXCEPTIONS: u32 = 0x6822;
+/// Guest SYSENTER stack and entry addresses (natural-width VMCS fields).
+pub const GUEST_IA32_SYSENTER_ESP: u32 = 0x6824;
+pub const GUEST_IA32_SYSENTER_EIP: u32 = 0x6826;
 
 /// Host segment selectors (16-bit VMCS fields).
 pub const HOST_ES_SELECTOR: u32 = 0x0C00;

@@ -10,6 +10,7 @@ mod output;
 mod vmx;
 use vmx::VmxCapabilities;
 use vmx::guest::{GuestMappings, GuestMemory, GuestMemoryError};
+use vmx::guest_state::{GuestState, GuestStateError};
 use vmx::host_tables::{GdtError, GdtRegion, TssError, TssRegion};
 use vmx::segment::DescriptorTable;
 use vmx::vmcs::{DesiredControls, VmcsError, VmcsRegion};
@@ -43,6 +44,13 @@ enum BringUpError {
     VmxOn(VmxOnError),
     /// A VMCS step failed; `operation` names the step for the report.
     Vmcs { operation: &'static str, error: VmcsError },
+    GuestState(GuestStateError),
+}
+
+impl From<GuestStateError> for BringUpError {
+    fn from(error: GuestStateError) -> Self {
+        Self::GuestState(error)
+    }
 }
 
 impl From<TssError> for BringUpError {
@@ -150,7 +158,7 @@ fn bring_up() -> Result<Hypervisor, BringUpError> {
     let mappings = unsafe { guest.check_mappings() }?;
     report_guest_mappings(&guest, &mappings);
 
-    let (vmxon, vmcs) = bring_up_vmx(&vmexit_stack)?;
+    let (vmxon, vmcs) = bring_up_vmx(&vmexit_stack, &guest)?;
 
     check_host_tables_preserved(&host_tables);
 
@@ -198,9 +206,12 @@ fn activate_host_tables() -> Result<HostTables, BringUpError> {
     })
 }
 
-/// Detects VMX, enters root operation, then prepares the VMCS controls and
-/// host state. VM entry is not attempted.
-fn bring_up_vmx(vmexit_stack: &VmExitStack) -> Result<(VmxOnRegion, VmcsRegion), BringUpError> {
+/// Detects VMX, enters root operation, then prepares the VMCS controls,
+/// host state, and guest state. VM entry is not attempted.
+fn bring_up_vmx(
+    vmexit_stack: &VmExitStack,
+    guest: &GuestMemory,
+) -> Result<(VmxOnRegion, VmcsRegion), BringUpError> {
     match unsafe { vmx::detect() } {
         VmxCapabilities::Supported => {
             log!("VMX supported and enabled by firmware.");
@@ -251,7 +262,37 @@ fn bring_up_vmx(vmexit_stack: &VmExitStack) -> Result<(VmxOnRegion, VmcsRegion),
         .map_err(vmcs_step("host entry address setup"))?;
     log!("VMCS HOST_RSP/HOST_RIP written and read back; VM entry not attempted.");
 
+    // After the controls: they decide whether guest PAT/EFER fields exist.
+    let guest_state = unsafe { GuestState::from_current(guest.code_base(), guest.stack_top()) }?;
+    unsafe { guest_state.write() }?;
+    report_guest_state(&guest_state);
+
     Ok((vmxon, vmcs))
+}
+
+/// Prints the guest state that was written to the VMCS. If VM entry later
+/// fails with "invalid guest state" (exit reason 33), these are the values
+/// the CPU rejected.
+fn report_guest_state(state: &GuestState) {
+    log!(
+        "Guest rip={:#018x} rsp={:#018x} rflags={:#x} cr0={:#x} cr3={:#x} cr4={:#x}",
+        state.rip, state.rsp, state.rflags, state.cr0, state.cr3, state.cr4,
+    );
+    for (name, segment) in [
+        ("cs", state.cs), ("ss", state.ss), ("ds", state.ds), ("es", state.es),
+        ("fs", state.fs), ("gs", state.gs), ("tr", state.tr), ("ldtr", state.ldtr),
+    ] {
+        log!(
+            "Guest {name:<4} selector={:#06x} base={:#018x} limit={:#010x} access={:#07x}",
+            segment.selector, segment.base, segment.limit, segment.access_rights,
+        );
+    }
+    log!(
+        "Guest gdtr={:#018x}/{:#06x} idtr={:#018x}/{:#06x}; PAT load={} EFER load={}",
+        state.gdtr.base, state.gdtr.limit, state.idtr.base, state.idtr.limit,
+        state.pat.is_some(), state.efer.is_some(),
+    );
+    log!("VMCS guest fields written and read back; VM entry not attempted.");
 }
 
 /// Prints how the current page tables, which the guest will share, map the
@@ -318,6 +359,14 @@ fn report_error(error: BringUpError) {
         BringUpError::VmxDisabledByFirmware => log!("VMX supported by CPU but disabled by firmware."),
         BringUpError::VmxOn(error) => log!("VMXON failed: {error:?}"),
         BringUpError::Vmcs { operation, error } => report_vmcs_error(operation, error),
+        BringUpError::GuestState(GuestStateError::Vmcs { field, error }) => {
+            log!("Guest-state field {field:#06x} failed:");
+            report_vmcs_error("guest-state write", error);
+        }
+        BringUpError::GuestState(GuestStateError::ReadbackMismatch { field, written, read }) => log!(
+            "Guest-state field {field:#06x} read back {read:#x}, but {written:#x} was written."
+        ),
+        BringUpError::GuestState(error) => log!("Guest state invalid: {error:x?}"),
     }
 }
 

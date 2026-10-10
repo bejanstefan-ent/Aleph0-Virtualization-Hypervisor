@@ -1,9 +1,17 @@
 # Aleph0 Virtualization Hypervisor
 
-A learning-oriented Intel VT-x hypervisor written in Rust and booted as a UEFI
-application. It currently enters VMX root operation and prepares a VMCS; no
-guest runs yet. See [ROADMAP.md](ROADMAP.md) for what has been verified and
-what comes next.
+An Intel VT-x hypervisor written in Rust and booted as a UEFI application.
+Aleph0 is being built to stay resident after `ExitBootServices` and run an
+operating system as its guest, with EPT memory isolation and multiple vCPUs.
+The end goal is research into game anti-cheat: running below the guest OS,
+the hypervisor can watch and protect a game's memory where kernel-mode cheats
+cannot reach. The project is also a study of AI-driven development in
+low-level `unsafe` Rust, and of AI-assisted reverse-engineering tooling for
+the analysis the anti-cheat needs.
+
+It currently enters VMX root operation and fills in a complete VMCS
+(controls, host state and guest state); the first VM entry is next. See
+[ROADMAP.md](ROADMAP.md) for what has been verified and what comes next.
 
 ## Requirements
 

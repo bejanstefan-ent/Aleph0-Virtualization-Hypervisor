@@ -9,7 +9,8 @@
 //!    check how the page tables map the guest pages.
 //! 3. Detect VMX, enter VMX root operation, and fill in the VMCS: controls,
 //!    host state, guest state ([`bring_up_vmx`]).
-//! 4. Check that none of this disturbed the host's descriptor tables.
+//! 4. Check that none of this disturbed the host's descriptor tables, and
+//!    stop if it did.
 //! 5. Launch the guest with VMLAUNCH. On success this never returns: the
 //!    guest's first VM exit goes to the exit handler in `vmx::vmexit`.
 //!
@@ -96,9 +97,9 @@ pub fn run() -> Result<Infallible, BringUpError> {
     // for as long as it is in VMX operation.
     let (_vmxon, _vmcs) = bring_up_vmx(&vmexit_stack, &guest)?;
 
-    check_host_tables_preserved(&host_tables);
+    check_host_tables_preserved(&host_tables)?;
 
-    log!("Launching the guest with VMLAUNCH; its first VM exit is reported on serial only.");
+    log!("Launching the guest with VMLAUNCH; its VM exits are reported on serial only.");
     let error = unsafe { vmx::vmcs::launch() };
     Err(vmcs_step("launch")(error))
 }
@@ -189,8 +190,10 @@ fn bring_up_vmx(
 }
 
 /// Confirms that VMXON, the VMCS work, and UEFI calls left the host GDTR,
-/// TR, TSS base, and IDTR as they were after activation.
-fn check_host_tables_preserved(expected: &HostTables) {
+/// TR, TSS base, and IDTR as they were after activation. If anything
+/// changed, stops before the launch: the host fields in the VMCS describe
+/// the activated tables, and every VM exit would load them.
+fn check_host_tables_preserved(expected: &HostTables) -> Result<(), BringUpError> {
     let gdtr = unsafe { vmx::segment::read_gdtr() };
     let tr = unsafe { vmx::segment::read_tr() };
     let idtr = unsafe { vmx::segment::read_idtr() };
@@ -201,6 +204,7 @@ fn check_host_tables_preserved(expected: &HostTables) {
 
     if same_gdtr && same_idtr && same_tss_base {
         log!("Host GDTR, TR, TSS base and IDTR preserved after VMX/UEFI calls.");
+        Ok(())
     } else {
         log!("WARNING: Host descriptor state changed after VMX/UEFI calls.");
         log!(
@@ -208,5 +212,6 @@ fn check_host_tables_preserved(expected: &HostTables) {
             expected.gdtr, expected.tr, expected.tss_base, expected.idtr,
         );
         log!("Actual GDTR={gdtr:?} TR={tr:#06x} IDTR={idtr:?} TSS base matches={same_tss_base}");
+        Err(BringUpError::HostTablesChanged)
     }
 }

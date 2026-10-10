@@ -22,6 +22,10 @@ pub enum BringUpError {
     /// A VMCS step failed; `operation` names the step for the report.
     Vmcs { operation: &'static str, error: VmcsError },
     GuestState(GuestStateError),
+    /// GDTR, TR, the TSS base or IDTR changed between activation and the
+    /// launch. The VMCS host fields were written from the activated tables,
+    /// so a VM exit would load stale ones.
+    HostTablesChanged,
 }
 
 impl From<TssError> for BringUpError {
@@ -89,6 +93,9 @@ pub fn report_error(error: BringUpError) {
             "Guest-state field {field:#06x} read back {read:#x}, but {written:#x} was written."
         ),
         BringUpError::GuestState(error) => log!("Guest state invalid: {error:x?}"),
+        BringUpError::HostTablesChanged => log!(
+            "Host descriptor tables changed after VMX/UEFI calls; the guest was not launched."
+        ),
     }
 }
 

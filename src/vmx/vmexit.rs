@@ -1,5 +1,5 @@
 //! VM-exit host resources: the exit stack, the assembly entry stub, and the
-//! first-exit diagnostic handler.
+//! exit handler.
 //!
 //! On every VM exit the CPU loads host state from the VMCS and jumps to
 //! HOST_RIP ([`entry_address`]) with RSP = HOST_RSP ([`VmExitStack::top`]).
@@ -8,17 +8,22 @@
 //! CPU, so the stub saves them before any Rust code can clobber them.
 //!
 //! `bring_up::run` ends with VMLAUNCH, so the guest's first VM exit lands
-//! here. The handler prints the exit over serial and halts; there is no
-//! VMRESUME path yet.
+//! here. The handler prints each exit over serial. On the guest's first
+//! VMCALL it advances guest RIP and returns, and the stub executes VMRESUME.
+//! On the second it stops, as on any unexpected exit, and halts.
 
 use core::ptr::NonNull;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::output::halt_forever;
 
 use super::guest::GUEST_MARKER;
 use super::page::{allocate_zeroed_pages, PAGE_SIZE};
 use super::vmcs::{self, VmcsError};
-use super::vmcs::fields::{EXIT_QUALIFICATION, GUEST_RIP, VM_EXIT_INSTRUCTION_LEN, VM_EXIT_REASON};
+use super::vmcs::fields::{
+    EXIT_QUALIFICATION, GUEST_RIP, VM_EXIT_INSTRUCTION_LEN, VM_EXIT_INTERRUPTION_INFO,
+    VM_EXIT_REASON,
+};
 
 pub const VM_EXIT_STACK_PAGES: usize = 4;
 pub const VM_EXIT_STACK_SIZE: usize = VM_EXIT_STACK_PAGES * PAGE_SIZE;
@@ -70,6 +75,17 @@ struct RegisterFrame {
     r15: u64,
 }
 
+// Every exit enters here with RSP = HOST_RSP, the top of the exit stack, so
+// the stack starts empty on each exit and does not grow across exits.
+//
+// Stack alignment (Microsoft x64 ABI: RSP is a multiple of 16 at each
+// `call`): HOST_RSP is 16-aligned; 15 pushes take 120 bytes, and 40 more
+// (32 bytes of shadow space plus 8 of padding) make 160, a multiple of 16.
+// After the 15 pops RSP is HOST_RSP again, so the failure path needs only
+// the 32 bytes of shadow space.
+//
+// Only the 15 general-purpose registers are saved. The handler may change
+// XMM0-XMM5 (caller-saved in this ABI); this guest does not use them.
 core::arch::global_asm!(
     r#"
     .globl vmexit_entry
@@ -94,6 +110,33 @@ vmexit_entry:
     sub rsp, 40
     cld
     call vmexit_handler
+
+    // The handler returned: resume the guest. Restore its registers in the
+    // reverse order of the pushes above; RIP, RSP and RFLAGS come from the
+    // VMCS, not from this frame.
+    add rsp, 40
+    pop rax
+    pop rbx
+    pop rcx
+    pop rdx
+    pop rsi
+    pop rdi
+    pop rbp
+    pop r8
+    pop r9
+    pop r10
+    pop r11
+    pop r12
+    pop r13
+    pop r14
+    pop r15
+    vmresume
+
+    // Reached only if VMRESUME failed; RFLAGS say how.
+    pushfq
+    pop rcx
+    sub rsp, 32
+    call vmresume_failed
     ud2
 "#
 );
@@ -143,19 +186,64 @@ pub fn exit_reason_name(basic: u16) -> &'static str {
     }
 }
 
+/// Basic exit reason of an exception (or NMI) exit.
+const EXIT_REASON_EXCEPTION_OR_NMI: u16 = 0;
 /// Basic exit reason of a VMCALL exit.
 const EXIT_REASON_VMCALL: u16 = 18;
 
-/// Whether an exit is the one the first launch is built to produce: the
-/// guest ran `mov eax, GUEST_MARKER` and then `VMCALL`.
+/// How many VMCALL exits the guest is resumed through before the handler
+/// stops: the first exit is resumed, the second ends the run.
+const PLANNED_VMCALL_EXITS: u64 = 2;
+
+/// Exits handled so far, including the current one, so the first exit is
+/// number 1. Only the exit handler touches it, with interrupts off, on the
+/// one CPU that runs the guest; the atomic just avoids `static mut`.
+static EXIT_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// The guest's RAX at its `number`th VMCALL exit (1-based): the marker, plus
+/// one for each `inc eax` the resumed guest has run since. `number` is
+/// always at least 1.
+fn expected_guest_rax(number: u64) -> u64 {
+    u64::from(GUEST_MARKER) + number - 1
+}
+
+/// Whether exit `number` is the VMCALL exit the guest is built to produce.
 ///
-/// The reason alone is not enough. The marker still in the guest's RAX shows
-/// that the guest's own instructions ran up to the VMCALL, and that the CPU
-/// did not, for example, exit before executing anything.
-fn is_expected_first_exit(reason: ExitReason, guest_rax: u64) -> bool {
+/// The reason alone is not enough. The marker in the guest's RAX shows that
+/// the guest's own instructions ran up to the VMCALL. Its increase on later
+/// exits shows that the guest resumed past the previous VMCALL instead of
+/// running it again.
+fn is_expected_vmcall_exit(number: u64, reason: ExitReason, guest_rax: u64) -> bool {
     !reason.entry_failure
         && reason.basic == EXIT_REASON_VMCALL
-        && guest_rax == u64::from(GUEST_MARKER)
+        && guest_rax == expected_guest_rax(number)
+}
+
+/// What the handler does after printing an exit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExitAction {
+    /// Advance guest RIP past the VMCALL and return to the guest.
+    Resume,
+    /// The last planned exit arrived as expected; stop.
+    Finished,
+    /// Not an exit this hypervisor handles; stop without resuming.
+    Unexpected,
+}
+
+fn exit_action(number: u64, reason: ExitReason, guest_rax: u64) -> ExitAction {
+    if !is_expected_vmcall_exit(number, reason, guest_rax) {
+        ExitAction::Unexpected
+    } else if number < PLANNED_VMCALL_EXITS {
+        ExitAction::Resume
+    } else {
+        ExitAction::Finished
+    }
+}
+
+/// The exception vector in a VM_EXIT_INTERRUPTION_INFO value, if the field
+/// is valid (bit 31). Bits 7:0 hold the vector.
+fn exception_vector(info: u32) -> Option<u8> {
+    (info & (1 << 31) != 0).then_some(info as u8)
 }
 
 /// Reads one VMCS field for the diagnostic, printing instead of failing.
@@ -173,41 +261,45 @@ fn report_unreadable(name: &str, error: VmcsError) {
     crate::serial_println!("{} VM exit: {name} unreadable ({error:?})", crate::TAG);
 }
 
-/// First-exit diagnostic: report what happened over serial, then halt.
+/// VM-exit handler: prints the exit over serial, then either advances guest
+/// RIP and returns (the entry stub then executes VMRESUME), or halts.
 ///
 /// Runs on the VM-exit stack with interrupts off. It may only use things
-/// that need no firmware: VMREAD (the VMCS is still current) and the serial
-/// port. `uefi::println!` must not be called here; `log!` and the panic
-/// handler skip the console once the phase below is set.
+/// that need no firmware: VMREAD/VMWRITE (the VMCS is still current) and the
+/// serial port. `uefi::println!` must not be called here; `log!` and the
+/// panic handler skip the console once the phase below is set.
 ///
-/// Once VMRESUME exists, this becomes a dispatcher that handles the exit,
-/// advances guest RIP by VM_EXIT_INSTRUCTION_LEN, and resumes the guest.
+/// Returns only to resume the guest. Every other path halts, because there
+/// is no way back to firmware yet (ROADMAP section 4b).
 #[unsafe(no_mangle)]
-extern "efiapi" fn vmexit_handler(frame: *const RegisterFrame) -> ! {
+extern "efiapi" fn vmexit_handler(frame: *const RegisterFrame) {
     // First, so every line below (and any panic) skips the firmware console.
     // Never switched back: after VMLAUNCH the host runs only in exit handlers.
     crate::output::set_phase(crate::output::Phase::VmExit);
 
     let tag = crate::TAG;
+    let number = EXIT_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
 
     let reason = read_or_report("VM_EXIT_REASON", VM_EXIT_REASON)
         .map(|raw| ExitReason::from_raw(raw as u32));
     if let Some(reason) = reason {
         crate::serial_println!(
-            "{tag} VM exit: reason={} ({}){}",
+            "{tag} VM exit #{number}: reason={} ({}){}",
             reason.basic,
             exit_reason_name(reason.basic),
             if reason.entry_failure { " [VM entry failed; guest did not run]" } else { "" },
         );
+        if reason.basic == EXIT_REASON_EXCEPTION_OR_NMI && !reason.entry_failure {
+            report_exception(number);
+        }
     }
     if let Some(qualification) = read_or_report("EXIT_QUALIFICATION", EXIT_QUALIFICATION) {
-        crate::serial_println!("{tag} VM exit: qualification={qualification:#018x}");
+        crate::serial_println!("{tag} VM exit #{number}: qualification={qualification:#018x}");
     }
-    if let (Some(rip), Some(length)) = (
-        read_or_report("GUEST_RIP", GUEST_RIP),
-        read_or_report("VM_EXIT_INSTRUCTION_LEN", VM_EXIT_INSTRUCTION_LEN),
-    ) {
-        crate::serial_println!("{tag} VM exit: guest rip={rip:#018x} instruction length={length}");
+    let rip = read_or_report("GUEST_RIP", GUEST_RIP);
+    let length = read_or_report("VM_EXIT_INSTRUCTION_LEN", VM_EXIT_INSTRUCTION_LEN);
+    if let (Some(rip), Some(length)) = (rip, length) {
+        crate::serial_println!("{tag} VM exit #{number}: guest rip={rip:#018x} instruction length={length}");
     }
 
     // The stub pushed these just below HOST_RSP; after a normal exit they are
@@ -216,18 +308,83 @@ extern "efiapi" fn vmexit_handler(frame: *const RegisterFrame) -> ! {
     // VMLAUNCH, not the guest's.
     let frame = unsafe { &*frame };
     crate::serial_println!(
-        "{tag} VM exit: guest rax={:#018x} rbx={:#018x} rcx={:#018x} rdx={:#018x}",
+        "{tag} VM exit #{number}: guest rax={:#018x} rbx={:#018x} rcx={:#018x} rdx={:#018x}",
         frame.rax, frame.rbx, frame.rcx, frame.rdx,
     );
 
-    match reason {
-        Some(reason) if is_expected_first_exit(reason, frame.rax) => crate::serial_println!(
-            "{tag} VM exit: expected first exit: the guest ran and executed VMCALL (marker {GUEST_MARKER:#x} in RAX)."
+    let action = match reason {
+        Some(reason) => exit_action(number, reason, frame.rax),
+        None => ExitAction::Unexpected,
+    };
+    match action {
+        ExitAction::Resume => match (rip, length) {
+            (Some(rip), Some(length)) => match unsafe { vmcs::vmwrite(GUEST_RIP, rip + length) } {
+                Ok(()) => {
+                    crate::serial_println!(
+                        "{tag} VM exit #{number}: expected VMCALL (rax={:#x}); resuming the guest at rip={:#018x}.",
+                        frame.rax, rip + length,
+                    );
+                    // Back to the stub, which restores the guest registers
+                    // and executes VMRESUME.
+                    return;
+                }
+                Err(error) => crate::serial_println!(
+                    "{tag} VM exit #{number}: could not advance guest RIP ({error:?}); not resuming."
+                ),
+            },
+            _ => crate::serial_println!(
+                "{tag} VM exit #{number}: guest RIP or instruction length unreadable; not resuming."
+            ),
+        },
+        ExitAction::Finished => crate::serial_println!(
+            "{tag} VM exit #{number}: expected VMCALL (rax={:#x}); all {PLANNED_VMCALL_EXITS} planned exits handled.",
+            frame.rax,
         ),
-        _ => crate::serial_println!("{tag} VM exit: NOT the expected guest VMCALL exit."),
+        ExitAction::Unexpected => crate::serial_println!(
+            "{tag} VM exit #{number}: NOT an expected guest VMCALL exit (expected rax={:#x}).",
+            expected_guest_rax(number),
+        ),
     }
 
-    crate::serial_println!("{tag} VM exit: halting; there is no VMRESUME path yet.");
+    crate::serial_println!("{tag} VM exit #{number}: halting; returning to firmware is ROADMAP section 4b.");
+    halt_forever();
+}
+
+/// Prints the vector of an exception exit. Exit qualification, printed by
+/// the caller, holds the faulting address for a page fault (#PF, vector 14).
+fn report_exception(number: u64) {
+    let tag = crate::TAG;
+    if let Some(info) = read_or_report("VM_EXIT_INTERRUPTION_INFO", VM_EXIT_INTERRUPTION_INFO) {
+        match exception_vector(info as u32) {
+            Some(vector) => crate::serial_println!(
+                "{tag} VM exit #{number}: guest exception vector={vector} (interruption info={info:#010x})"
+            ),
+            None => crate::serial_println!(
+                "{tag} VM exit #{number}: interruption info not valid ({info:#010x})"
+            ),
+        }
+    }
+}
+
+/// Called by the entry stub when VMRESUME falls through instead of entering
+/// the guest; `rflags` is RFLAGS right after it. Prints why, then halts.
+#[unsafe(no_mangle)]
+extern "efiapi" fn vmresume_failed(rflags: u64) -> ! {
+    let tag = crate::TAG;
+    match vmcs::resume_failure(rflags) {
+        // VmFailValid implies a current VMCS, so the error number is readable.
+        VmcsError::VmFailValid => match unsafe { vmcs::vm_instruction_error() } {
+            Ok(code) => crate::serial_println!(
+                "{tag} VMRESUME failed: {} ({code})",
+                vmcs::vm_instruction_error_name(code),
+            ),
+            Err(error) => crate::serial_println!(
+                "{tag} VMRESUME failed: VmFailValid, error unreadable ({error:?})"
+            ),
+        },
+        error => crate::serial_println!("{tag} VMRESUME failed: {error:?}"),
+    }
+    crate::serial_println!("{tag} VMRESUME failed; halting.");
     halt_forever();
 }
 
@@ -259,37 +416,81 @@ mod tests {
     }
 
     const VMCALL_EXIT: ExitReason = ExitReason { basic: 18, entry_failure: false };
+    const MARKER: u64 = GUEST_MARKER as u64;
 
     #[test]
-    fn vmcall_with_marker_is_the_expected_first_exit() {
-        assert!(is_expected_first_exit(VMCALL_EXIT, u64::from(GUEST_MARKER)));
+    fn first_vmcall_with_marker_is_expected() {
+        assert!(is_expected_vmcall_exit(1, VMCALL_EXIT, MARKER));
     }
 
     #[test]
-    fn vmcall_without_marker_is_not_the_expected_first_exit() {
+    fn second_vmcall_with_marker_plus_one_is_expected() {
+        // The resumed guest ran `inc eax` before its second VMCALL.
+        assert!(is_expected_vmcall_exit(2, VMCALL_EXIT, MARKER + 1));
+    }
+
+    #[test]
+    fn second_vmcall_with_unchanged_marker_is_not_expected() {
+        // RAX unchanged means the guest re-ran the same VMCALL: guest RIP
+        // was not advanced past it.
+        assert!(!is_expected_vmcall_exit(2, VMCALL_EXIT, MARKER));
+    }
+
+    #[test]
+    fn vmcall_without_marker_is_not_expected() {
         // Right reason, but RAX does not prove the guest's own code ran.
-        assert!(!is_expected_first_exit(VMCALL_EXIT, 0));
+        assert!(!is_expected_vmcall_exit(1, VMCALL_EXIT, 0));
     }
 
     #[test]
-    fn entry_failure_is_never_the_expected_first_exit() {
+    fn entry_failure_is_never_expected() {
         let invalid_guest_state = ExitReason { basic: 33, entry_failure: true };
-        assert!(!is_expected_first_exit(invalid_guest_state, u64::from(GUEST_MARKER)));
+        assert!(!is_expected_vmcall_exit(1, invalid_guest_state, MARKER));
     }
 
     #[test]
-    fn entry_failure_alone_rules_out_the_expected_first_exit() {
-        // Right basic reason and marker; only the entry-failure bit differs
-        // from the expected exit.
+    fn entry_failure_alone_rules_out_an_expected_exit() {
+        // Right basic reason and marker; only the entry-failure bit differs.
         let failed_vmcall = ExitReason { basic: 18, entry_failure: true };
-        assert!(!is_expected_first_exit(failed_vmcall, u64::from(GUEST_MARKER)));
+        assert!(!is_expected_vmcall_exit(1, failed_vmcall, MARKER));
     }
 
     #[test]
-    fn other_reason_alone_rules_out_the_expected_first_exit() {
+    fn other_reason_alone_rules_out_an_expected_exit() {
         // Marker present and no entry failure; only the basic reason (CPUID)
-        // differs from the expected exit.
+        // differs.
         let cpuid_exit = ExitReason { basic: 10, entry_failure: false };
-        assert!(!is_expected_first_exit(cpuid_exit, u64::from(GUEST_MARKER)));
+        assert!(!is_expected_vmcall_exit(1, cpuid_exit, MARKER));
+    }
+
+    #[test]
+    fn first_expected_exit_resumes_the_guest() {
+        assert_eq!(exit_action(1, VMCALL_EXIT, MARKER), ExitAction::Resume);
+    }
+
+    #[test]
+    fn last_planned_exit_finishes() {
+        assert_eq!(
+            exit_action(PLANNED_VMCALL_EXITS, VMCALL_EXIT, MARKER + PLANNED_VMCALL_EXITS - 1),
+            ExitAction::Finished,
+        );
+    }
+
+    #[test]
+    fn unexpected_exit_is_never_resumed() {
+        let cpuid_exit = ExitReason { basic: 10, entry_failure: false };
+        assert_eq!(exit_action(1, cpuid_exit, MARKER), ExitAction::Unexpected);
+    }
+
+    #[test]
+    fn exception_vector_is_bits_7_to_0_of_valid_info() {
+        // Valid (bit 31), error code (bit 11), hardware exception (type 3),
+        // vector 14: a page fault.
+        assert_eq!(exception_vector(0x8000_0B0E), Some(14));
+    }
+
+    #[test]
+    fn exception_vector_needs_the_valid_bit() {
+        assert_eq!(exception_vector(0x0000_0B0E), None);
     }
 }

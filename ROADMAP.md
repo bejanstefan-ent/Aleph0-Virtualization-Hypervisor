@@ -141,7 +141,7 @@ Open questions to settle before this section starts: which game or test target, 
 ## How to verify each milestone
 
 - Run `cargo build --target x86_64-unknown-uefi` after each change. It checks compilation, not VM-entry validity.
-- Run `cargo test-host` for the host unit tests of pure logic (RFLAGS decoding, control selection, descriptor encoding). They do not execute VMX instructions.
+- Run `cargo test-host` for the host unit tests of pure logic (RFLAGS decoding, control selection, descriptor encoding). They do not execute VMX instructions. They live in `tests/unit/`, mirroring `src/`.
 - Run `scripts/run-hyperv.ps1` from an elevated PowerShell session and inspect the VM console and the serial stream in the PowerShell window (also saved to `run\serial.log`). The runner turns off the named test VM and recreates its ESP VHDX; do not keep irreplaceable data there. VM-exit diagnostics appear only on serial.
 - Record observed VMX instruction errors and VM-exit reasons as milestones are reached. QEMU without nested VMX can still test non-VMX diagnostics, but cannot validate `VMLAUNCH`.
 

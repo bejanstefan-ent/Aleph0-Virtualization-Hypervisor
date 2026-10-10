@@ -338,13 +338,5 @@ macro_rules! serial_println {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn divisor_for_common_rates() {
-        assert_eq!(divisor(115_200), 1);
-        assert_eq!(divisor(57_600), 2);
-        assert_eq!(divisor(9_600), 12);
-    }
-}
+#[path = "../tests/unit/serial.rs"]
+mod tests;

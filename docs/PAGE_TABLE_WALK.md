@@ -479,7 +479,8 @@ pub fn walk(cr3: u64, virtual_address: u64, read_entry: impl Fn(u64) -> u64)
 - It returns a `Mapping`: `physical`, `size` (`Size4K` / `Size2M` /
   `Size1G`), `writable`, `user`, `execute_disable`. Or it returns
   `WalkError::NotPresent { level }`, naming the level where P was 0.
-- Because memory is a parameter, the host unit tests build small fake page
+- Because memory is a parameter, the host unit tests
+  (`tests/unit/vmx/paging.rs`) build small fake page
   tables in a `HashMap` (address → entry). They check 4 KiB, 2 MiB and
   1 GiB pages, the PAT bit, CR3's ignored low bits, AND/OR combining, and
   missing entries.

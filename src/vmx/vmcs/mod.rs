@@ -90,6 +90,10 @@ pub enum VmcsError {
     ControlReadbackMismatch,
     /// Host state validation failed.
     HostStateValidation,
+    /// VMLAUNCH fell through to the next instruction with CF and ZF both
+    /// clear. A successful VMLAUNCH never falls through, so the guest was
+    /// not entered, for a reason the flags do not say.
+    LaunchReturned,
 }
 
 impl From<VmxFail> for VmcsError {
@@ -239,6 +243,51 @@ pub unsafe fn vmwrite(field_encoding: u32, value: u64) -> Result<(), VmcsError> 
     }
 
     Ok(check_rflags(rflags)?)
+}
+
+/// Enters the guest described by the current VMCS for the first time.
+///
+/// **Returns only on failure.** When VMLAUNCH succeeds, the CPU loads the
+/// guest state and runs the guest. The next host code to execute is
+/// HOST_RIP, on the VM-exit stack, after the guest's first VM exit, and
+/// nothing after the `vmlaunch` below runs.
+///
+/// When this returns, the guest was not entered:
+/// - [`VmcsError::VmFailInvalid`]: there is no valid current VMCS.
+/// - [`VmcsError::VmFailValid`]: the reason is in [`vm_instruction_error`]:
+///   7 = invalid control fields, 8 = invalid host-state fields, 4 = the VMCS
+///   was already launched.
+///
+/// Invalid *guest* state is reported differently: the CPU performs a VM exit
+/// with bit 31 of the exit reason set (basic reason 33), which the VM-exit
+/// handler prints.
+///
+/// # Safety
+///
+/// VMX root operation, with a current VMCS whose controls, host state and
+/// guest state are fully written. HOST_RSP and HOST_RIP must point at a live
+/// exit stack and handler, and the guest's pages must stay allocated.
+pub unsafe fn launch() -> VmcsError {
+    let rflags: u64;
+    unsafe {
+        asm!(
+            "vmlaunch",
+            "pushfq",
+            "pop {rflags}",
+            rflags = lateout(reg) rflags,
+        );
+    }
+    launch_failure(rflags)
+}
+
+/// Decodes the RFLAGS left behind when VMLAUNCH falls through. That only
+/// happens on failure, so clear flags become [`VmcsError::LaunchReturned`]
+/// instead of success.
+fn launch_failure(rflags: u64) -> VmcsError {
+    match check_rflags(rflags) {
+        Err(fail) => fail.into(),
+        Ok(()) => VmcsError::LaunchReturned,
+    }
 }
 
 /// Derive legal pin, primary, exit, and entry controls from the CPU masks,
@@ -488,5 +537,27 @@ mod tests {
             choose_control(capability(0x1, 0x0), 0),
             Err(VmcsError::UnsupportedControlValue),
         );
+    }
+
+    const CF: u64 = 1 << 0;
+    const ZF: u64 = 1 << 6;
+    /// RFLAGS bit 1 always reads as 1.
+    const RESERVED: u64 = 1 << 1;
+
+    #[test]
+    fn launch_with_cf_is_fail_invalid() {
+        assert_eq!(launch_failure(RESERVED | CF), VmcsError::VmFailInvalid);
+    }
+
+    #[test]
+    fn launch_with_zf_is_fail_valid() {
+        assert_eq!(launch_failure(RESERVED | ZF), VmcsError::VmFailValid);
+    }
+
+    #[test]
+    fn launch_falling_through_with_clear_flags_is_still_a_failure() {
+        // A successful VMLAUNCH never reaches the next instruction, so
+        // clear flags here must not be read as success.
+        assert_eq!(launch_failure(RESERVED), VmcsError::LaunchReturned);
     }
 }

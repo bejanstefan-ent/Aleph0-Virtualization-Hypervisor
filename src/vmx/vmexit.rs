@@ -7,8 +7,9 @@
 //! to 0x2), and the guest's general-purpose registers are still live in the
 //! CPU, so the stub saves them before any Rust code can clobber them.
 //!
-//! No guest is launched yet, so none of this has executed. When it does, the
-//! handler prints the exit over serial and halts; there is no VMRESUME path.
+//! `bring_up::run` ends with VMLAUNCH, so the guest's first VM exit lands
+//! here. The handler prints the exit over serial and halts; there is no
+//! VMRESUME path yet.
 
 use core::ptr::NonNull;
 
@@ -40,7 +41,7 @@ impl VmExitStack {
         Ok(Self { base })
     }
 
-    /// Top of the downward-growing stack for HOST_RSP; VM entry is not attempted yet.
+    /// Top of the downward-growing stack, for HOST_RSP.
     pub fn top(&self) -> u64 {
         // Compute base + VM_EXIT_STACK_SIZE, check 16-byte alignment, and
         // return the address as u64. The stack grows toward lower addresses.

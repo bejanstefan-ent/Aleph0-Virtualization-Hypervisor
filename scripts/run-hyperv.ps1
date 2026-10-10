@@ -33,7 +33,7 @@ param(
 
 $espType = '{c12a7328-f81f-11d2-ba4b-00a0c93ec93b}'   # EFI System Partition GPT type
 
-$root         = $PSScriptRoot
+$root         = Split-Path -Parent $PSScriptRoot   # this script lives in scripts/
 $buildProfile = if ($Release) { "release" } else { "debug" }
 $efiSrc       = Join-Path $root "target\x86_64-unknown-uefi\$buildProfile\aleph0hypervisor.efi"
 $runDir       = Join-Path $root "run"
@@ -139,5 +139,5 @@ vmconnect.exe localhost $VMName
 # 6. Stream COM1. Connect immediately: Hyper-V drops serial output written
 #    while no client is attached, and the firmware reaches our code in seconds.
 if (-not $NoSerial) {
-    & (Join-Path $root "read-serial.ps1") -PipeName $PipeName
+    & (Join-Path $PSScriptRoot "read-serial.ps1") -PipeName $PipeName
 }

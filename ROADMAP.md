@@ -5,7 +5,7 @@ This is a learning-oriented Intel VT-x hypervisor booted as a UEFI application. 
 ## Current state
 
 - [x] Build a `x86_64-unknown-uefi` application with `cargo build`.
-- [x] Boot the EFI application with the Hyper-V Gen 2 runner (`run-hyperv.ps1`); nested virtualization exposes VMX. The runner requires an elevated PowerShell session.
+- [x] Boot the EFI application with the Hyper-V Gen 2 runner (`scripts/run-hyperv.ps1`); nested virtualization exposes VMX. The runner requires an elevated PowerShell session.
 - [x] Check CPUID VMX support and firmware's `IA32_FEATURE_CONTROL` settings.
 - [x] Set `CR4.VMXE`, apply the VMX CR0/CR4 fixed bits, allocate a VMXON region, and enter VMX root operation.
 - [x] Allocate and load a VMCS; verify a `VMWRITE`/`VMREAD` round trip.
@@ -28,7 +28,7 @@ There is no guest execution, observed VM exit, EPT, or OS boot yet. The VM-exit 
 - [x] Drive the 16550 UART at COM1 (`0x3F8`) from `src/serial.rs`: 115200 8N1, polled, no interrupts. Probe with loopback before enabling output, and bound every wait so a missing UART cannot hang the hypervisor.
 - [x] Provide `serial_print!`/`serial_println!` through `core::fmt` with no allocation, for use in exit context.
 - [x] Route bring-up messages through `log!`, which writes each line to both the firmware console and COM1.
-- [x] Attach COM1 to `\\.\pipe\aleph0-com1` in `run-hyperv.ps1` and stream it with `read-serial.ps1`, which also saves `run\serial.log`. The reader was tested against a local pipe server, not yet against Hyper-V.
+- [x] Attach COM1 to `\\.\pipe\aleph0-com1` in `scripts/run-hyperv.ps1` and stream it with `scripts/read-serial.ps1`, which also saves `run\serial.log`. The reader was tested against a local pipe server, not yet against Hyper-V.
 - [x] Confirm on Hyper-V: the console prints `Serial output enabled on COM1`, and the PowerShell window and `run\serial.log` show the same bring-up lines as the VM console.
 
 **Checkpoint:** A Hyper-V run produces a `run\serial.log` that matches the VM console. Only then rely on serial as the observation path for the first VM exit.
@@ -49,7 +49,7 @@ Before the first `VMLAUNCH` (section 3):
 
 At the `ExitBootServices` milestone (section 5):
 
-- [ ] Make the serial port base a parameter instead of the fixed `COM1`. Send hypervisor output to COM2 (`0x2F8`) and leave COM1 to the guest OS, without interception at first. In `run-hyperv.ps1`, attach COM2 to `\\.\pipe\aleph0-com2` and point `read-serial.ps1` at it.
+- [ ] Make the serial port base a parameter instead of the fixed `COM1`. Send hypervisor output to COM2 (`0x2F8`) and leave COM1 to the guest OS, without interception at first. In `scripts/run-hyperv.ps1`, attach COM2 to `\\.\pipe\aleph0-com2` and point `scripts/read-serial.ps1` at it.
 - [ ] Switch the phase to runtime immediately after `ExitBootServices`. Ideally make the console unreachable from runtime code, so a mistake fails to compile rather than silently printing nothing.
 - [ ] Keep the logging code and its state (`serial.rs` statics such as `READY`) in memory the OS will not reclaim. This is part of the persistence item in section 5, not a separate mechanism.
 
@@ -121,7 +121,7 @@ At the virtual-device milestone (section 5):
 
 - Run `cargo build --target x86_64-unknown-uefi` after each change. It checks compilation, not VM-entry validity.
 - Run `cargo test-host` for the host unit tests of pure logic (RFLAGS decoding, control selection, descriptor encoding). They do not execute VMX instructions.
-- Run `run-hyperv.ps1` from an elevated PowerShell session and inspect the VM console and the serial stream in the PowerShell window (also saved to `run\serial.log`). The runner turns off the named test VM and recreates its ESP VHDX; do not keep irreplaceable data there. VM-exit diagnostics appear only on serial.
+- Run `scripts/run-hyperv.ps1` from an elevated PowerShell session and inspect the VM console and the serial stream in the PowerShell window (also saved to `run\serial.log`). The runner turns off the named test VM and recreates its ESP VHDX; do not keep irreplaceable data there. VM-exit diagnostics appear only on serial.
 - Record observed VMX instruction errors and VM-exit reasons as milestones are reached. QEMU without nested VMX can still test non-VMX diagnostics, but cannot validate `VMLAUNCH`.
 
-Relevant code: `src/main.rs`, `src/bring_up/`, `src/serial.rs`, `src/output.rs`, `src/vmx/segment.rs`, `src/vmx/vmxon.rs`, `src/vmx/vmcs/`, `src/vmx/vmexit.rs`, `src/vmx/guest.rs`, `src/vmx/paging.rs`, `src/vmx/guest_state.rs`, `run-hyperv.ps1`, and `read-serial.ps1`.
+Relevant code: `src/main.rs`, `src/bring_up/`, `src/serial.rs`, `src/output.rs`, `src/vmx/segment.rs`, `src/vmx/vmxon.rs`, `src/vmx/vmcs/`, `src/vmx/vmexit.rs`, `src/vmx/guest.rs`, `src/vmx/paging.rs`, `src/vmx/guest_state.rs`, `scripts/run-hyperv.ps1`, and `scripts/read-serial.ps1`.

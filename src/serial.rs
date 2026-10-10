@@ -79,11 +79,11 @@
 //!
 //! # Seeing the output
 //!
-//! * QEMU: `run.ps1` passes `-serial stdio`, so output appears in the
+//! * QEMU: `scripts/run.ps1` passes `-serial stdio`, so output appears in the
 //!   terminal. OVMF also mirrors its own console to COM1, so lines printed
 //!   with `log!` in `main` show up twice there: once from OVMF, once from
 //!   this module.
-//! * Hyper-V: `run-hyperv.ps1` attaches COM1 to a named pipe and reads it;
+//! * Hyper-V: `scripts/run-hyperv.ps1` attaches COM1 to a named pipe and reads it;
 //!   see that script and the README.
 //!
 //! # Concurrency

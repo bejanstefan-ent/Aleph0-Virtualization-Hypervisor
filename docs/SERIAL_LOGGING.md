@@ -186,7 +186,7 @@ crate::serial_println!("VM exit: reason={reason} rip={rip:#x}");
 3. Hyper-V reads the exit: "OUT, port 0x3F8, 1 byte", and AL = 'H'
 4. Hyper-V's software UART (in vmwp.exe on the host) writes 'H' into \\.\pipe\aleph0-com1
 5. Hyper-V moves Aleph0's RIP past the `out` and resumes it
-6. read-serial.ps1 reads 'H' from the pipe → PowerShell window + run\serial.log
+6. scripts/read-serial.ps1 reads 'H' from the pipe → PowerShell window + run\serial.log
 ```
 
 Aleph0 cannot tell the chip is software. Steps 2–5 are the same work
@@ -222,15 +222,15 @@ can run in the VM-exit handler.**
 
 ### Hyper-V
 
-`run-hyperv.ps1` attaches COM1 to the named pipe `\\.\pipe\aleph0-com1`,
-starts the VM, opens the video console, and then runs `read-serial.ps1`.
+`scripts/run-hyperv.ps1` attaches COM1 to the named pipe `\\.\pipe\aleph0-com1`,
+starts the VM, opens the video console, and then runs `scripts/read-serial.ps1`.
 That script connects to the pipe and prints every line in your PowerShell
 window, while also saving it to `run\serial.log`. It exits when the VM turns
 off.
 
 - Hyper-V drops serial output written while nothing is connected to the
   pipe, which is why the reader connects right after `Start-VM`.
-- To reattach to a VM that is already running, run `.\read-serial.ps1`.
+- To reattach to a VM that is already running, run `.\scripts\read-serial.ps1`.
   Lines sent before you connected are lost.
 - `-NoSerial` skips the reader (COM1 is still attached). You can also
   connect with PuTTY: connection type *Serial*, serial line
@@ -238,7 +238,7 @@ off.
 
 ### QEMU
 
-`run.ps1` already passes `-serial stdio`, so COM1 appears in the terminal.
+`scripts/run.ps1` already passes `-serial stdio`, so COM1 appears in the terminal.
 OVMF also copies its own console to COM1, so every `log!` line shows up
 twice: one copy comes through OVMF (sometimes with terminal escape codes),
 and one comes straight from Aleph0. `serial_println!` lines appear once.
@@ -309,7 +309,7 @@ developers rely on it.
 |---|---|
 | Console says `Serial output disabled: LoopbackFailed` | No UART at `0x3F8`: COM1 not attached to the VM (`Get-VMComPort -VMName Aleph0Test`). |
 | Reader times out connecting | VM not running, or `-PipeName` differs between the two scripts. |
-| Reader connects but shows nothing | It connected after the hypervisor printed. Restart the VM with `run-hyperv.ps1`. |
+| Reader connects but shows nothing | It connected after the hypervisor printed. Restart the VM with `scripts/run-hyperv.ps1`. |
 | Doubled lines under QEMU | Expected: OVMF mirrors its console to COM1. |
 
 ## Where this goes next

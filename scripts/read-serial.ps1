@@ -29,7 +29,8 @@ param(
 
 # See run.ps1 for why $ErrorActionPreference is not set to "Stop" globally.
 
-$runDir  = Join-Path $PSScriptRoot "run"
+$root    = Split-Path -Parent $PSScriptRoot   # this script lives in scripts/
+$runDir  = Join-Path $root "run"
 $logPath = Join-Path $runDir "serial.log"
 New-Item -ItemType Directory -Force -Path $runDir | Out-Null
 

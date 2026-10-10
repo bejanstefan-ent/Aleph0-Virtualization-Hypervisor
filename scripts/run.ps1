@@ -18,8 +18,8 @@ param(
 # terminating error whenever output is redirected or captured. Exit codes are
 # checked explicitly after native commands instead.
 
-$root      = $PSScriptRoot
-$profile   = if ($Release) { "release" } else { "debug" }
+$root      = Split-Path -Parent $PSScriptRoot   # this script lives in scripts/
+$profile  = if ($Release) { "release" } else { "debug" }
 $target    = "x86_64-unknown-uefi"
 $efiSrc    = Join-Path $root "target\$target\$profile\aleph0hypervisor.efi"
 $espDir    = Join-Path $root "esp"

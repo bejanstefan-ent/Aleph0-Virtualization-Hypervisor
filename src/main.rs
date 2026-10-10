@@ -42,15 +42,12 @@ fn main() -> Status {
         Err(error) => log!("Serial output disabled: {error:?}; console only."),
     }
 
-    // Held until the loop below: the CPU keeps using these regions for as
-    // long as it stays in VMX operation, so none may be freed before then.
-    let _hypervisor = match bring_up::run() {
-        Ok(hypervisor) => Some(hypervisor),
-        Err(error) => {
-            bring_up::report_error(error);
-            None
-        }
-    };
+    // On success, bring-up ends in VMLAUNCH and never comes back: the
+    // guest's first VM exit goes to the exit handler, which reports over
+    // serial and halts. So the only way back here is an error. `Ok` holds
+    // `Infallible`, which has no values, so this pattern always matches.
+    let Err(error) = bring_up::run();
+    bring_up::report_error(error);
 
     loop { }
 }

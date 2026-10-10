@@ -9,9 +9,9 @@ cannot reach. The project is also a study of AI-driven development in
 low-level `unsafe` Rust, and of AI-assisted reverse-engineering tooling for
 the analysis the anti-cheat needs.
 
-It currently enters VMX root operation and fills in a complete VMCS
-(controls, host state and guest state); the first VM entry is next. See
-[ROADMAP.md](ROADMAP.md) for what has been verified and what comes next.
+It currently enters VMX root operation, fills in a complete VMCS, and
+launches a minimal guest; the guest's VMCALL exit is reported over serial.
+See [ROADMAP.md](ROADMAP.md) for what has been verified and what comes next.
 
 ## Requirements
 

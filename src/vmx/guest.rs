@@ -6,11 +6,11 @@
 //! works because the code is position-independent: no absolute addresses,
 //! only relative jumps.
 //!
-//! Guest RIP will be [`GuestMemory::code_base`] and guest RSP
-//! [`GuestMemory::stack_top`]. Neither is written to the VMCS yet.
-//! [`GuestMemory::check_mappings`] confirms that the current page tables,
-//! which the guest will share, map the code page executable and the stack
-//! page writable.
+//! Guest RIP is [`GuestMemory::code_base`] and guest RSP
+//! [`GuestMemory::stack_top`]; `GuestState::write` (in `guest_state`) writes
+//! both to the VMCS. [`GuestMemory::check_mappings`] confirms that the
+//! current page tables, which the guest will share, map the code page
+//! executable and the stack page writable.
 
 use core::ptr::NonNull;
 

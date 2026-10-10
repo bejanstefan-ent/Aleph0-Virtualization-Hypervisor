@@ -24,10 +24,25 @@
 pub const PIN_BASED_VM_EXEC_CONTROL: u32 = 0x4000;
 /// Primary processor-based VM-execution controls.
 pub const PRIMARY_VM_EXEC_CONTROL: u32 = 0x4002;
+/// CR3-target count: how many CR3-target values are valid; VM entry requires
+/// at most 4.
+pub const CR3_TARGET_COUNT: u32 = 0x400A;
 /// VM-exit controls.
 pub const VM_EXIT_CONTROLS: u32 = 0x400C;
+/// VM-exit MSR-store count: entries in the MSR-store list; nonzero needs a
+/// valid list address.
+pub const VM_EXIT_MSR_STORE_COUNT: u32 = 0x400E;
+/// VM-exit MSR-load count: entries in the MSR-load list; nonzero needs a
+/// valid list address.
+pub const VM_EXIT_MSR_LOAD_COUNT: u32 = 0x4010;
 /// VM-entry controls.
 pub const VM_ENTRY_CONTROLS: u32 = 0x4012;
+/// VM-entry MSR-load count: entries in the MSR-load list; nonzero needs a
+/// valid list address.
+pub const VM_ENTRY_MSR_LOAD_COUNT: u32 = 0x4014;
+/// VM-entry interruption-information field: bit 31 set injects an event on
+/// entry, so 0 means no injection.
+pub const VM_ENTRY_INTERRUPTION_INFO: u32 = 0x4016;
 
 // ── Bits inside the control fields ───────────────────────────────────────
 

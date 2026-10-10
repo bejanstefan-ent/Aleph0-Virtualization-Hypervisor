@@ -10,6 +10,8 @@
 //! 3. Detect VMX, enter VMX root operation, and fill in the VMCS: controls,
 //!    host state, guest state ([`bring_up_vmx`]).
 //! 4. Check that none of this disturbed the host's descriptor tables.
+//! 5. Launch the guest with VMLAUNCH. On success this never returns: the
+//!    guest's first VM exit goes to the exit handler in `vmx::vmexit`.
 //!
 //! Each step returns either what the CPU will keep using or a
 //! [`BringUpError`]; `?` stops at the first failure and [`report_error`]
@@ -18,6 +20,8 @@
 
 mod error;
 mod report;
+
+use core::convert::Infallible;
 
 pub use error::{report_error, BringUpError};
 
@@ -44,21 +48,32 @@ struct HostTables {
     idtr: DescriptorTable,
 }
 
-/// Everything the CPU may still use while it stays in VMX operation.
-pub struct Hypervisor {
-    _host_tables: HostTables,
-    _vmexit_stack: VmExitStack,
-    _guest: GuestMemory,
-    _vmxon: VmxOnRegion,
-    _vmcs: VmcsRegion,
-}
+// The CPU keeps using these pages for as long as it is in VMX operation,
+// including after `run` returns an error. Freeing them on drop would hand
+// memory the CPU still uses back to UEFI, so none of them may implement
+// `Drop`; this turns adding a `Drop` impl (or a field that needs dropping)
+// into a compile error.
+const _: () = assert!(
+    !core::mem::needs_drop::<TssRegion>()
+        && !core::mem::needs_drop::<GdtRegion>()
+        && !core::mem::needs_drop::<VmExitStack>()
+        && !core::mem::needs_drop::<GuestMemory>()
+        && !core::mem::needs_drop::<VmxOnRegion>()
+        && !core::mem::needs_drop::<VmcsRegion>()
+);
 
-/// Activates the host tables, enters VMX operation, and prepares the VMCS.
+/// Activates the host tables, enters VMX operation, prepares the VMCS, and
+/// launches the guest.
 ///
-/// Stops at the first failure. Regions allocated before that point are
-/// leaked rather than freed (none implement `Drop`), so memory the CPU may
-/// still reference — such as the VMXON region — is never returned to UEFI.
-pub fn run() -> Result<Hypervisor, BringUpError> {
+/// **Returns only on failure.** `Infallible` has no values, so `Ok` can
+/// never be returned. On success VMLAUNCH enters the guest, and the next
+/// host code to run is the VM-exit handler.
+///
+/// Every region allocated here (TSS, GDT, VM-exit stack, guest pages, VMXON
+/// region, VMCS) must stay allocated while the CPU may use it. None of these
+/// types implement `Drop`, so their pages are never returned to UEFI, not
+/// even when this function returns early with an error.
+pub fn run() -> Result<Infallible, BringUpError> {
     let host_tables = activate_host_tables()?;
 
     // Independent of VMX, so this runs and prints even under QEMU/TCG.
@@ -75,17 +90,17 @@ pub fn run() -> Result<Hypervisor, BringUpError> {
     let mappings = unsafe { guest.check_mappings() }?;
     report::guest_mappings(&guest, &mappings);
 
-    let (vmxon, vmcs) = bring_up_vmx(&vmexit_stack, &guest)?;
+    // Named, not `_`, so the values are not dropped early. Dropping frees
+    // nothing anyway: the assertion above guarantees that none of the region
+    // types implement `Drop`, and the CPU uses the VMXON region and the VMCS
+    // for as long as it is in VMX operation.
+    let (_vmxon, _vmcs) = bring_up_vmx(&vmexit_stack, &guest)?;
 
     check_host_tables_preserved(&host_tables);
 
-    Ok(Hypervisor {
-        _host_tables: host_tables,
-        _vmexit_stack: vmexit_stack,
-        _guest: guest,
-        _vmxon: vmxon,
-        _vmcs: vmcs,
-    })
+    log!("Launching the guest with VMLAUNCH; its first VM exit is reported on serial only.");
+    let error = unsafe { vmx::vmcs::launch() };
+    Err(vmcs_step("launch")(error))
 }
 
 /// Builds a GDT that adds a TSS descriptor to a copy of the firmware's GDT,

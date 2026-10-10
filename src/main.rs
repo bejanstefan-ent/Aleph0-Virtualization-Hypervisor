@@ -9,6 +9,7 @@ mod serial;
 mod output;
 mod vmx;
 use vmx::VmxCapabilities;
+use vmx::guest::{GuestMappings, GuestMemory, GuestMemoryError};
 use vmx::host_tables::{GdtError, GdtRegion, TssError, TssRegion};
 use vmx::segment::DescriptorTable;
 use vmx::vmcs::{DesiredControls, VmcsError, VmcsRegion};
@@ -36,6 +37,7 @@ enum BringUpError {
     Tss(TssError),
     Gdt(GdtError),
     VmExitStack(VmExitStackError),
+    GuestMemory(GuestMemoryError),
     VmxNotSupportedByCpu,
     VmxDisabledByFirmware,
     VmxOn(VmxOnError),
@@ -58,6 +60,12 @@ impl From<GdtError> for BringUpError {
 impl From<VmExitStackError> for BringUpError {
     fn from(error: VmExitStackError) -> Self {
         Self::VmExitStack(error)
+    }
+}
+
+impl From<GuestMemoryError> for BringUpError {
+    fn from(error: GuestMemoryError) -> Self {
+        Self::GuestMemory(error)
     }
 }
 
@@ -87,6 +95,7 @@ struct HostTables {
 struct Hypervisor {
     _host_tables: HostTables,
     _vmexit_stack: VmExitStack,
+    _guest: GuestMemory,
     _vmxon: VmxOnRegion,
     _vmcs: VmcsRegion,
 }
@@ -133,6 +142,14 @@ fn bring_up() -> Result<Hypervisor, BringUpError> {
     let vmexit_stack = VmExitStack::allocate()?;
     log!("VM-exit stack allocated: top={:#018x} size={VM_EXIT_STACK_SIZE}.", vmexit_stack.top());
 
+    let guest = GuestMemory::allocate()?;
+    log!(
+        "Guest memory allocated: code={:#018x} ({} bytes copied) stack top={:#018x}.",
+        guest.code_base(), guest.code_len(), guest.stack_top(),
+    );
+    let mappings = unsafe { guest.check_mappings() }?;
+    report_guest_mappings(&guest, &mappings);
+
     let (vmxon, vmcs) = bring_up_vmx(&vmexit_stack)?;
 
     check_host_tables_preserved(&host_tables);
@@ -140,6 +157,7 @@ fn bring_up() -> Result<Hypervisor, BringUpError> {
     Ok(Hypervisor {
         _host_tables: host_tables,
         _vmexit_stack: vmexit_stack,
+        _guest: guest,
         _vmxon: vmxon,
         _vmcs: vmcs,
     })
@@ -236,6 +254,27 @@ fn bring_up_vmx(vmexit_stack: &VmExitStack) -> Result<(VmxOnRegion, VmcsRegion),
     Ok((vmxon, vmcs))
 }
 
+/// Prints how the current page tables, which the guest will share, map the
+/// guest pages. Only called once both permission checks have passed.
+fn report_guest_mappings(guest: &GuestMemory, mappings: &GuestMappings) {
+    let stack_base = guest.stack_top() - vmx::page::PAGE_SIZE as u64;
+    for (name, virtual_address, mapping) in [
+        ("code", guest.code_base(), mappings.code),
+        ("stack", stack_base, mappings.stack),
+    ] {
+        log!(
+            "Guest {name} page: virt={virtual_address:#018x} phys={:#018x} identity={} size={:?} writable={} xd={}",
+            mapping.physical, mapping.physical == virtual_address, mapping.size,
+            mapping.writable, mapping.execute_disable,
+        );
+    }
+
+    // The guest shares these tables, so a guest EFER.NXE that differs from
+    // the host's would turn any XD bit in them into a reserved-bit fault.
+    let nxe = unsafe { vmx::msr::rdmsr(vmx::msr::IA32_EFER) } & vmx::paging::EFER_NXE != 0;
+    log!("Guest code page executable and stack page writable; host EFER.NXE={nxe}.");
+}
+
 /// Confirms that VMXON, the VMCS work, and UEFI calls left the host GDTR,
 /// TR, TSS base, and IDTR as they were after activation.
 fn check_host_tables_preserved(expected: &HostTables) {
@@ -270,6 +309,7 @@ fn report_error(error: BringUpError) {
         ),
         BringUpError::Gdt(error) => log!("Host GDT/TSS setup failed: {error:?}; GDTR/TR unchanged."),
         BringUpError::VmExitStack(error) => log!("VM-exit stack allocation failed: {error:?}"),
+        BringUpError::GuestMemory(error) => log!("Guest memory setup failed: {error:?}"),
         BringUpError::VmxNotSupportedByCpu => log!("VMX not supported by this CPU."),
         BringUpError::VmxDisabledByFirmware => log!("VMX supported by CPU but disabled by firmware."),
         BringUpError::VmxOn(error) => log!("VMXON failed: {error:?}"),

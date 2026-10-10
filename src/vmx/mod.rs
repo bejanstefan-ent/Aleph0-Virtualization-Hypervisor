@@ -21,9 +21,11 @@ pub mod cr;
 pub mod vmxon;
 pub mod vmcs;
 pub mod vmexit;
+pub mod guest;
 pub mod segment;
 pub mod host_tables;
 pub mod page;
+pub mod paging;
 
 /// Overall VMX support/readiness state for the current CPU.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

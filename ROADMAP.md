@@ -19,7 +19,7 @@ This is a learning-oriented Intel VT-x hypervisor booted as a UEFI application. 
 
 There is no guest execution, observed VM exit, EPT, or OS boot yet. The VM-exit handler is written to print the exit over serial and halt, but has never run; the stored host entry addresses have only been read back, not used by a VM exit. Guest RIP/RSP and exit-reason constants exist, but guest state and `VMLAUNCH` are not configured.
 
-**Next:** section 2, guest side. Add `src/vmx/guest.rs` owning a guest code page (first instruction `VMCALL`) and a separate guest stack page, check that the current page tables (guest CR3 = host CR3, no EPT) map the code page executable and the stack page writable, then write the guest-state fields and read them back. After that comes section 3: the first `VMLAUNCH` and the `VMCALL` exit (reason 18) on serial.
+**Next:** section 2, guest side. `src/vmx/guest.rs` owns the guest code and stack pages, and Hyper-V confirmed the page-table check (guest CR3 = host CR3, no EPT). Next, write the guest-state fields and read them back. After that comes section 3: the first `VMLAUNCH` and the `VMCALL` exit (reason 18) on serial.
 
 ## 0. Debug output that works without firmware
 
@@ -29,7 +29,7 @@ There is no guest execution, observed VM exit, EPT, or OS boot yet. The VM-exit 
 - [x] Provide `serial_print!`/`serial_println!` through `core::fmt` with no allocation, for use in exit context.
 - [x] Route bring-up messages through `log!`, which writes each line to both the firmware console and COM1.
 - [x] Attach COM1 to `\\.\pipe\aleph0-com1` in `run-hyperv.ps1` and stream it with `read-serial.ps1`, which also saves `run\serial.log`. The reader was tested against a local pipe server, not yet against Hyper-V.
-- [ ] Confirm on Hyper-V: the console prints `Serial output enabled on COM1`, and the PowerShell window and `run\serial.log` show the same bring-up lines as the VM console.
+- [x] Confirm on Hyper-V: the console prints `Serial output enabled on COM1`, and the PowerShell window and `run\serial.log` show the same bring-up lines as the VM console.
 
 **Checkpoint:** A Hyper-V run produces a `run\serial.log` that matches the VM console. Only then rely on serial as the observation path for the first VM exit.
 
@@ -81,8 +81,8 @@ At the virtual-device milestone (section 5):
 
 - [x] Read `IA32_VMX_BASIC` and check bit 55. Read the true-control MSRs if available, otherwise the ordinary control MSRs, for pin-based, primary processor-based, VM-exit, and VM-entry controls. Print each MSR's low and high 32-bit halves. The Hyper-V boot printed all four values without faulting.
 - [x] Derive legal values from those MSRs: the low halves specify bits that must be 1, and the high halves specify bits allowed to be 1. Reject requested features the CPU cannot enable. Write the four controls to the VMCS and read them back. A successful `VMWRITE`/`VMREAD` proves storage, not that VM entry will succeed.
-- [ ] Add a guest-memory owner (for example, `src/vmx/guest.rs`) that allocates and retains separate guest code and guest stack pages. Start with tiny guest code whose first test instruction is `VMCALL`; keep both pages alive for the entire VMX experiment.
-- [ ] Decide and verify guest address translation before using those pages. With EPT disabled, guest virtual addresses translate through guest CR3; confirm the code page is executable and the separate stack page is writable under those page tables. Do not assume a UEFI allocation address is automatically usable by the guest.
+- [x] Add a guest-memory owner (for example, `src/vmx/guest.rs`) that allocates and retains separate guest code and guest stack pages. Start with tiny guest code whose first test instruction is `VMCALL`; keep both pages alive for the entire VMX experiment. `GuestMemory` copies `mov eax, GUEST_MARKER; vmcall; jmp back to vmcall` from a `global_asm!` block into a `LOADER_CODE` page (firmware may map `LOADER_DATA` no-execute) and allocates a `LOADER_DATA` stack page; `Hypervisor` keeps both. The marker in RAX shows on serial that the guest's own instructions ran. Hyper-V printed `Guest memory allocated: code=0x000000007eb1c000 (10 bytes copied)`.
+- [x] Decide and verify guest address translation before using those pages. With EPT disabled, guest virtual addresses translate through guest CR3; confirm the code page is executable and the separate stack page is writable under those page tables. Do not assume a UEFI allocation address is automatically usable by the guest. Decided: guest CR3 = host CR3, no EPT. Written: `src/vmx/paging.rs` walks the live 4-level tables (reading them through UEFI's identity mapping), combines R/W and XD over every level, and `GuestMemory::check_mappings` stops bring-up unless the code page has XD clear and the stack page is writable. Host tests cover 4 KiB/2 MiB/1 GiB leaves, permission combining and missing entries. On Hyper-V both pages were identity-mapped 4 KiB pages, writable, with XD clear (so this firmware does not map `LOADER_DATA` no-execute; `LOADER_CODE` stays as a portable precaution), and host EFER.NXE=1. Step 3 must give the guest EFER.NXE=1 too, or any XD bit in these shared tables becomes a reserved-bit fault.
 - [ ] Build a known, simple 64-bit guest context: valid CR0/CR3/CR4, segment selectors/bases/limits/access rights, GDTR/IDTR, RIP pointing at the guest code, RSP pointing at the guest stack, RFLAGS bit 1 set, and a VMCS link pointer of all ones. Initialize all other guest fields required by the selected controls and retain their backing memory.
 - [ ] Add a guest-state writer and read back the fields it writes. This checks VMCS storage only; the CPU's VM-entry checks happen when entry is attempted.
 - [x] Write/read back host fields from the current root-mode state: selectors, CRs, FS/GS/TR and GDTR/IDTR bases, SYSENTER MSRs, and the dedicated VM-exit stack top and stub address. Load host PAT/EFER fields only if the selected exit controls require them.
@@ -124,4 +124,4 @@ At the virtual-device milestone (section 5):
 - Run `run-hyperv.ps1` from an elevated PowerShell session and inspect the VM console and the serial stream in the PowerShell window (also saved to `run\serial.log`). The runner turns off the named test VM and recreates its ESP VHDX; do not keep irreplaceable data there. VM-exit diagnostics appear only on serial.
 - Record observed VMX instruction errors and VM-exit reasons as milestones are reached. QEMU without nested VMX can still test non-VMX diagnostics, but cannot validate `VMLAUNCH`.
 
-Relevant code: `src/main.rs`, `src/serial.rs`, `src/output.rs`, `src/vmx/segment.rs`, `src/vmx/vmxon.rs`, `src/vmx/vmcs.rs`, `src/vmx/vmexit.rs`, `run-hyperv.ps1`, and `read-serial.ps1`.
+Relevant code: `src/main.rs`, `src/serial.rs`, `src/output.rs`, `src/vmx/segment.rs`, `src/vmx/vmxon.rs`, `src/vmx/vmcs.rs`, `src/vmx/vmexit.rs`, `src/vmx/guest.rs`, `src/vmx/paging.rs`, `run-hyperv.ps1`, and `read-serial.ps1`.

@@ -24,6 +24,15 @@
 pub const PIN_BASED_VM_EXEC_CONTROL: u32 = 0x4000;
 /// Primary processor-based VM-execution controls.
 pub const PRIMARY_VM_EXEC_CONTROL: u32 = 0x4002;
+/// Exception bitmap: bit N set makes guest exception vector N cause a VM exit
+/// (reason 0) instead of being delivered through the guest's IDT.
+pub const EXCEPTION_BITMAP: u32 = 0x4004;
+/// Page-fault error-code mask and match: with bit 14 of the exception bitmap
+/// set, a guest #PF exits only if (error code & mask) == match, so 0 and 0
+/// make every #PF exit.
+pub const PAGE_FAULT_ERROR_CODE_MASK: u32 = 0x4006;
+/// See [`PAGE_FAULT_ERROR_CODE_MASK`].
+pub const PAGE_FAULT_ERROR_CODE_MATCH: u32 = 0x4008;
 /// CR3-target count: how many CR3-target values are valid; VM entry requires
 /// at most 4.
 pub const CR3_TARGET_COUNT: u32 = 0x400A;
@@ -65,6 +74,10 @@ pub const VM_ENTRY_LOAD_IA32_EFER: u64 = 1 << 15;
 pub const VM_INSTRUCTION_ERROR: u32 = 0x4400;
 /// Why the last VM exit happened (32-bit).
 pub const VM_EXIT_REASON: u32 = 0x4402;
+/// VM-exit interruption information (32-bit), for exception exits (reason 0):
+/// bits 7:0 vector, bits 10:8 event type, bit 11 error code valid, bit 31 the
+/// field is valid.
+pub const VM_EXIT_INTERRUPTION_INFO: u32 = 0x4404;
 /// Length in bytes of the instruction that caused the exit (32-bit), for
 /// exits caused by an instruction (VMCALL, CPUID, ...). Used to advance RIP.
 pub const VM_EXIT_INSTRUCTION_LEN: u32 = 0x440C;

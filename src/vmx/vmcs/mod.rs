@@ -71,6 +71,15 @@ impl DesiredControls {
     }
 }
 
+/// Exception bitmap value: every exception vector (0-31) causes a VM exit.
+///
+/// The guest shares the firmware's IDT. Without an exit, a guest fault would
+/// run the firmware's exception handler inside the guest, which typically
+/// spins forever without ever exiting, so the host would see nothing. With
+/// all bits set, the fault arrives as exit reason 0 and the handler prints
+/// the vector.
+const EXCEPTION_BITMAP_ALL: u32 = u32::MAX;
+
 /// Why a VMCS operation failed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VmcsError {
@@ -94,6 +103,9 @@ pub enum VmcsError {
     /// clear. A successful VMLAUNCH never falls through, so the guest was
     /// not entered, for a reason the flags do not say.
     LaunchReturned,
+    /// VMRESUME fell through to the next instruction with CF and ZF both
+    /// clear. Like [`VmcsError::LaunchReturned`], the guest was not entered.
+    ResumeReturned,
 }
 
 impl From<VmxFail> for VmcsError {
@@ -284,15 +296,30 @@ pub unsafe fn launch() -> VmcsError {
 /// happens on failure, so clear flags become [`VmcsError::LaunchReturned`]
 /// instead of success.
 fn launch_failure(rflags: u64) -> VmcsError {
+    fall_through_failure(rflags, VmcsError::LaunchReturned)
+}
+
+/// Decodes the RFLAGS left behind when VMRESUME falls through. VMRESUME runs
+/// in the VM-exit entry stub (`vmx::vmexit`), which passes RFLAGS here, so
+/// this is public; clear flags become [`VmcsError::ResumeReturned`].
+pub fn resume_failure(rflags: u64) -> VmcsError {
+    fall_through_failure(rflags, VmcsError::ResumeReturned)
+}
+
+/// VMLAUNCH and VMRESUME reach the next instruction only when they fail:
+/// CF=1 and ZF=1 say how, and clear flags mean `clear`.
+fn fall_through_failure(rflags: u64, clear: VmcsError) -> VmcsError {
     match check_rflags(rflags) {
         Err(fail) => fail.into(),
-        Ok(()) => VmcsError::LaunchReturned,
+        Ok(()) => clear,
     }
 }
 
 /// Derive legal pin, primary, exit, and entry controls from the CPU masks,
 /// write them to the current VMCS, and verify each field by reading it back.
 /// Always request 64-bit host mode on VM exit, regardless of `desired.exit`.
+/// Also zeroes the counts and fields VM entry checks, and makes every guest
+/// exception exit ([`EXCEPTION_BITMAP_ALL`]).
 ///
 /// # Safety
 ///
@@ -325,18 +352,27 @@ pub unsafe fn configure_controls(capabilities: &VmcsControlMsrs, desired: Desire
 
         // VM entry checks these fields, and VMCLEAR does not guarantee that
         // a fresh VMCS holds zeros in them, so write the zeros explicitly:
-        // no CR3 targets, no MSR load/store lists, no event injection.
+        // no CR3 targets, no MSR load/store lists, no event injection. The
+        // #PF mask and match are not entry checks, but they decide which
+        // page faults the exception bitmap below catches: 0 and 0 mean all.
         for field in [
             CR3_TARGET_COUNT,
             VM_EXIT_MSR_STORE_COUNT,
             VM_EXIT_MSR_LOAD_COUNT,
             VM_ENTRY_MSR_LOAD_COUNT,
             VM_ENTRY_INTERRUPTION_INFO,
+            PAGE_FAULT_ERROR_CODE_MASK,
+            PAGE_FAULT_ERROR_CODE_MATCH,
         ] {
             vmwrite(field, 0)?;
             if vmread(field)? != 0 {
                 return Err(VmcsError::ControlReadbackMismatch);
             }
+        }
+
+        vmwrite(EXCEPTION_BITMAP, EXCEPTION_BITMAP_ALL.into())?;
+        if vmread(EXCEPTION_BITMAP)? != u64::from(EXCEPTION_BITMAP_ALL) {
+            return Err(VmcsError::ControlReadbackMismatch);
         }
     }
 
@@ -575,5 +611,21 @@ mod tests {
         // A successful VMLAUNCH never reaches the next instruction, so
         // clear flags here must not be read as success.
         assert_eq!(launch_failure(RESERVED), VmcsError::LaunchReturned);
+    }
+
+    #[test]
+    fn resume_with_cf_is_fail_invalid() {
+        assert_eq!(resume_failure(RESERVED | CF), VmcsError::VmFailInvalid);
+    }
+
+    #[test]
+    fn resume_with_zf_is_fail_valid() {
+        assert_eq!(resume_failure(RESERVED | ZF), VmcsError::VmFailValid);
+    }
+
+    #[test]
+    fn resume_falling_through_with_clear_flags_is_still_a_failure() {
+        // A successful VMRESUME never reaches the next instruction either.
+        assert_eq!(resume_failure(RESERVED), VmcsError::ResumeReturned);
     }
 }

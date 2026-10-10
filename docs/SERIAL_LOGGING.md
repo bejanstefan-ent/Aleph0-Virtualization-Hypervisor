@@ -255,14 +255,21 @@ A normal boot, in `run\serial.log`:
 ...
 ```
 
-Once `VMLAUNCH` exists, the exit handler will add lines like:
+After `VMLAUNCH`, the exit handler adds lines like these (confirmed on Hyper-V):
 
 ```text
-[Aleph0 Virtualization Hypervisor] VM exit: reason=18 (VMCALL)
-[Aleph0 Virtualization Hypervisor] VM exit: qualification=0x0000000000000000
-[Aleph0 Virtualization Hypervisor] VM exit: guest rip=0x... instruction length=3
-[Aleph0 Virtualization Hypervisor] VM exit: guest rax=0x... rbx=0x... rcx=0x... rdx=0x...
-[Aleph0 Virtualization Hypervisor] VM exit: halting; there is no VMRESUME path yet.
+[Aleph0 Virtualization Hypervisor] Launching the guest with VMLAUNCH; its VM exits are reported on serial only.
+[Aleph0 Virtualization Hypervisor] VM exit #1: reason=18 (VMCALL)
+[Aleph0 Virtualization Hypervisor] VM exit #1: qualification=0x0000000000000000
+[Aleph0 Virtualization Hypervisor] VM exit #1: guest rip=0x000000007eb11005 instruction length=3
+[Aleph0 Virtualization Hypervisor] VM exit #1: guest rax=0x000000000000a1e0 rbx=0x000000007f337018 rcx=0x0000000000000000 rdx=0x0000000000000000
+[Aleph0 Virtualization Hypervisor] VM exit #1: expected VMCALL (rax=0xa1e0); resuming the guest at rip=0x000000007eb11008.
+[Aleph0 Virtualization Hypervisor] VM exit #2: reason=18 (VMCALL)
+[Aleph0 Virtualization Hypervisor] VM exit #2: qualification=0x0000000000000000
+[Aleph0 Virtualization Hypervisor] VM exit #2: guest rip=0x000000007eb11005 instruction length=3
+[Aleph0 Virtualization Hypervisor] VM exit #2: guest rax=0x000000000000a1e1 rbx=0x000000007f337018 rcx=0x0000000000000000 rdx=0x0000000000000000
+[Aleph0 Virtualization Hypervisor] VM exit #2: expected VMCALL (rax=0xa1e1); all 2 planned exits handled.
+[Aleph0 Virtualization Hypervisor] VM exit #2: halting; returning to firmware is ROADMAP section 4b.
 ```
 
 If the reason line ends in `[VM entry failed; guest did not run]`, the CPU

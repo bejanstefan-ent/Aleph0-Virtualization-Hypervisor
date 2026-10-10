@@ -24,7 +24,9 @@ use super::paging::{self, Mapping, WalkError};
 ///
 /// The VM-exit handler prints the guest's RAX, so seeing this value on
 /// serial shows the guest's own instructions ran, not just that an exit
-/// happened. `mov eax` zero-extends, so RAX reads back as this value.
+/// happened. `mov eax` zero-extends, so RAX reads back as this value. The
+/// guest adds one before every later VMCALL, so exit N shows
+/// `GUEST_MARKER + N - 1`.
 pub const GUEST_MARKER: u32 = 0xA1E0;
 
 core::arch::global_asm!(
@@ -35,8 +37,10 @@ guest_code_start:
     mov eax, {marker}
 guest_vmcall_loop:
     vmcall
-    // Only reached if the host resumes the guest; exits again instead of
-    // running off the end of the page.
+    // Only reached when the host advanced RIP past the VMCALL and resumed
+    // the guest. The increment shows on the next exit: RAX one higher
+    // proves these instructions ran, rather than the VMCALL running again.
+    inc eax
     jmp guest_vmcall_loop
 guest_code_end:
 "#,
@@ -195,7 +199,8 @@ mod tests {
             [
                 0xB8, 0xE0, 0xA1, 0x00, 0x00, // mov eax, GUEST_MARKER
                 0x0F, 0x01, 0xC1,             // vmcall
-                0xEB, 0xFB,                   // jmp rel8 -5: back to vmcall
+                0xFF, 0xC0,                   // inc eax
+                0xEB, 0xF9,                   // jmp rel8 -7: back to vmcall
             ],
         );
     }

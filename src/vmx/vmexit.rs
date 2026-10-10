@@ -14,6 +14,7 @@ use core::ptr::NonNull;
 
 use crate::output::halt_forever;
 
+use super::guest::GUEST_MARKER;
 use super::page::{allocate_zeroed_pages, PAGE_SIZE};
 use super::vmcs::{self, VmcsError};
 use super::vmcs::fields::{EXIT_QUALIFICATION, GUEST_RIP, VM_EXIT_INSTRUCTION_LEN, VM_EXIT_REASON};
@@ -141,6 +142,21 @@ pub fn exit_reason_name(basic: u16) -> &'static str {
     }
 }
 
+/// Basic exit reason of a VMCALL exit.
+const EXIT_REASON_VMCALL: u16 = 18;
+
+/// Whether an exit is the one the first launch is built to produce: the
+/// guest ran `mov eax, GUEST_MARKER` and then `VMCALL`.
+///
+/// The reason alone is not enough. The marker still in the guest's RAX shows
+/// that the guest's own instructions ran up to the VMCALL, and that the CPU
+/// did not, for example, exit before executing anything.
+fn is_expected_first_exit(reason: ExitReason, guest_rax: u64) -> bool {
+    !reason.entry_failure
+        && reason.basic == EXIT_REASON_VMCALL
+        && guest_rax == u64::from(GUEST_MARKER)
+}
+
 /// Reads one VMCS field for the diagnostic, printing instead of failing.
 fn read_or_report(name: &str, field: u32) -> Option<u64> {
     match unsafe { vmcs::vmread(field) } {
@@ -173,8 +189,9 @@ extern "efiapi" fn vmexit_handler(frame: *const RegisterFrame) -> ! {
 
     let tag = crate::TAG;
 
-    if let Some(raw) = read_or_report("VM_EXIT_REASON", VM_EXIT_REASON) {
-        let reason = ExitReason::from_raw(raw as u32);
+    let reason = read_or_report("VM_EXIT_REASON", VM_EXIT_REASON)
+        .map(|raw| ExitReason::from_raw(raw as u32));
+    if let Some(reason) = reason {
         crate::serial_println!(
             "{tag} VM exit: reason={} ({}){}",
             reason.basic,
@@ -198,6 +215,13 @@ extern "efiapi" fn vmexit_handler(frame: *const RegisterFrame) -> ! {
         "{tag} VM exit: guest rax={:#018x} rbx={:#018x} rcx={:#018x} rdx={:#018x}",
         frame.rax, frame.rbx, frame.rcx, frame.rdx,
     );
+
+    match reason {
+        Some(reason) if is_expected_first_exit(reason, frame.rax) => crate::serial_println!(
+            "{tag} VM exit: expected first exit: the guest ran and executed VMCALL (marker {GUEST_MARKER:#x} in RAX)."
+        ),
+        _ => crate::serial_println!("{tag} VM exit: NOT the expected guest VMCALL exit."),
+    }
 
     crate::serial_println!("{tag} VM exit: halting; there is no VMRESUME path yet.");
     halt_forever();
@@ -228,5 +252,24 @@ mod tests {
     fn exit_reason_ignores_other_high_bits() {
         // Bits 30:16 carry unrelated flags (e.g. bit 27, enclave mode).
         assert_eq!(ExitReason::from_raw(0x0800_000A).basic, 10);
+    }
+
+    const VMCALL_EXIT: ExitReason = ExitReason { basic: 18, entry_failure: false };
+
+    #[test]
+    fn vmcall_with_marker_is_the_expected_first_exit() {
+        assert!(is_expected_first_exit(VMCALL_EXIT, u64::from(GUEST_MARKER)));
+    }
+
+    #[test]
+    fn vmcall_without_marker_is_not_the_expected_first_exit() {
+        // Right reason, but RAX does not prove the guest's own code ran.
+        assert!(!is_expected_first_exit(VMCALL_EXIT, 0));
+    }
+
+    #[test]
+    fn entry_failure_is_never_the_expected_first_exit() {
+        let invalid_guest_state = ExitReason { basic: 33, entry_failure: true };
+        assert!(!is_expected_first_exit(invalid_guest_state, u64::from(GUEST_MARKER)));
     }
 }

@@ -128,6 +128,16 @@
 //! XD = 1 at *any* level blocks execution (OR). A PTE saying "writable"
 //! under a read-only PDE is read-only.
 //!
+//! U/S works like R/W: a page is a *user* page only if U/S = 1 at every
+//! level (AND); one U/S = 0 makes it a *supervisor* page. That matters even
+//! for ring-0 code, through two CR4 bits:
+//! - SMEP (bit 20): ring 0 may not *execute* from user pages.
+//! - SMAP (bit 21): ring 0 may not *read or write* user pages unless
+//!   RFLAGS.AC = 1.
+//!
+//! So for a ring-0 guest, "XD clear" alone does not prove a page is
+//! executable, and "R/W set" alone does not prove it is writable.
+//!
 //! The CPU caches finished lookups in the TLB, so it does not walk on every
 //! access; writing CR3 flushes most of that cache.
 //!
@@ -167,6 +177,13 @@ use super::cr::{read_cr3, read_cr4};
 /// CR4 bit 12: 5-level paging. [`walk`] only handles 4 levels.
 pub const CR4_LA57: u64 = 1 << 12;
 
+/// CR4 bit 20: SMEP. Ring 0 may not execute from user pages.
+pub const CR4_SMEP: u64 = 1 << 20;
+
+/// CR4 bit 21: SMAP. Ring 0 may not read or write user pages while
+/// RFLAGS.AC = 0.
+pub const CR4_SMAP: u64 = 1 << 21;
+
 /// IA32_EFER bit 11: no-execute enable. While clear, the XD bit in a
 /// page-table entry is reserved, not a permission.
 pub const EFER_NXE: u64 = 1 << 11;
@@ -177,6 +194,8 @@ pub const EFER_NXE: u64 = 1 << 11;
 const PRESENT: u64 = 1 << 0;
 /// Bit 1 (R/W): writes allowed in this entry's region.
 const WRITABLE: u64 = 1 << 1;
+/// Bit 2 (U/S): user mode (ring 3) may access this entry's region.
+const USER: u64 = 1 << 2;
 /// Bit 7 (PS), in a PDPTE or PDE: this entry maps a 1 GiB or 2 MiB page
 /// directly instead of pointing to a table.
 const PAGE_SIZE_BIT: u64 = 1 << 7;
@@ -202,6 +221,9 @@ pub struct Mapping {
     /// R/W is set at every level. (Supervisor code may also write a
     /// read-only page while CR0.WP = 0; this does not count that.)
     pub writable: bool,
+    /// U/S is set at every level: a user page. Ring 0 cannot execute it
+    /// under CR4.SMEP, nor read or write it under CR4.SMAP (with AC = 0).
+    pub user: bool,
     /// XD is set at some level. Blocks instruction fetch when EFER.NXE = 1;
     /// when NXE = 0 the bit is reserved and any access faults.
     pub execute_disable: bool,
@@ -225,6 +247,7 @@ pub fn walk(cr3: u64, virtual_address: u64, read_entry: impl Fn(u64) -> u64) -> 
     let mut table = cr3 & ADDRESS_MASK;
     // Permissions are combined over the whole walk, starting permissive.
     let mut writable = true;
+    let mut user = true;
     let mut execute_disable = false;
 
     // Level 4 (PML4) down to level 1 (PT).
@@ -238,9 +261,10 @@ pub fn walk(cr3: u64, virtual_address: u64, read_entry: impl Fn(u64) -> u64) -> 
         if entry & PRESENT == 0 {
             return Err(WalkError::NotPresent { level });
         }
-        // Writable only if R/W is set at every level; one XD bit at any
-        // level is enough to block execution.
+        // Writable or user only if R/W or U/S is set at every level; one XD
+        // bit at any level is enough to block execution.
         writable &= entry & WRITABLE != 0;
+        user &= entry & USER != 0;
         execute_disable |= entry & EXECUTE_DISABLE != 0;
 
         // Does this entry map a page (end of the walk) or point to the next
@@ -262,6 +286,7 @@ pub fn walk(cr3: u64, virtual_address: u64, read_entry: impl Fn(u64) -> u64) -> 
                 physical: frame | (virtual_address & offset_mask),
                 size,
                 writable,
+                user,
                 execute_disable,
             });
         }
@@ -343,8 +368,29 @@ mod tests {
         let mapping = four_level_tables().walk(PML4, va(1, 2, 3, 4, 0xABC)).unwrap();
         assert_eq!(
             mapping,
-            Mapping { physical: 0x0012_3ABC, size: PageSize::Size4K, writable: true, execute_disable: false },
+            Mapping {
+                physical: 0x0012_3ABC,
+                size: PageSize::Size4K,
+                writable: true,
+                user: false,
+                execute_disable: false,
+            },
         );
+    }
+
+    #[test]
+    fn user_only_when_set_at_every_level() {
+        let mut tables = Tables::new();
+        tables
+            .set(PML4, 1, PDPT | P_RW | USER)
+            .set(PDPT, 2, PD | P_RW | USER)
+            .set(PD, 3, PT | P_RW | USER)
+            .set(PT, 4, 0x0012_3000 | P_RW | USER);
+        assert!(tables.walk(PML4, va(1, 2, 3, 4, 0)).unwrap().user);
+
+        // One supervisor entry anywhere makes it a supervisor page.
+        tables.set(PDPT, 2, PD | P_RW);
+        assert!(!tables.walk(PML4, va(1, 2, 3, 4, 0)).unwrap().user);
     }
 
     #[test]

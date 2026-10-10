@@ -16,6 +16,7 @@ use core::ptr::NonNull;
 
 use uefi::boot::MemoryType;
 
+use super::cr::read_cr4;
 use super::page::{allocate_zeroed_pages_of_type, PAGE_SIZE};
 use super::paging::{self, Mapping, WalkError};
 
@@ -69,8 +70,35 @@ pub enum GuestMemoryError {
     StackNotMapped(WalkError),
     /// The code page is mapped with XD set at some level.
     CodeNotExecutable,
+    /// The code page is a user page and CR4.SMEP is set, so the ring-0
+    /// guest could not execute it.
+    CodeBlockedBySmep,
     /// The stack page is read-only at some level.
     StackNotWritable,
+    /// The stack page is a user page and CR4.SMAP is set, so the ring-0
+    /// guest (RFLAGS.AC = 0) could not push to it.
+    StackBlockedBySmap,
+}
+
+/// Checks that a ring-0 guest running with `cr4` can execute from `code`
+/// and write to `stack`.
+///
+/// Assumes the guest gets this same CR4 and RFLAGS.AC = 0, as planned for
+/// the guest state.
+fn check_permissions(code: &Mapping, stack: &Mapping, cr4: u64) -> Result<(), GuestMemoryError> {
+    if code.execute_disable {
+        return Err(GuestMemoryError::CodeNotExecutable);
+    }
+    if code.user && cr4 & paging::CR4_SMEP != 0 {
+        return Err(GuestMemoryError::CodeBlockedBySmep);
+    }
+    if !stack.writable {
+        return Err(GuestMemoryError::StackNotWritable);
+    }
+    if stack.user && cr4 & paging::CR4_SMAP != 0 {
+        return Err(GuestMemoryError::StackBlockedBySmap);
+    }
+    Ok(())
 }
 
 /// How the current page tables map the two guest pages.
@@ -138,7 +166,9 @@ impl GuestMemory {
     /// can never straddle two mappings.
     ///
     /// Requiring XD clear is stricter than needed when EFER.NXE = 0, but then
-    /// a set XD bit is reserved and would fault anyway.
+    /// a set XD bit is reserved and would fault anyway. The guest runs in
+    /// ring 0, so a user page is also refused where CR4.SMEP (code) or
+    /// CR4.SMAP (stack) would block it; see [`check_permissions`].
     ///
     /// # Safety
     ///
@@ -149,12 +179,7 @@ impl GuestMemory {
         let stack = unsafe { paging::walk_current(self.stack.as_ptr() as u64) }
             .map_err(GuestMemoryError::StackNotMapped)?;
 
-        if code.execute_disable {
-            return Err(GuestMemoryError::CodeNotExecutable);
-        }
-        if !stack.writable {
-            return Err(GuestMemoryError::StackNotWritable);
-        }
+        check_permissions(&code, &stack, unsafe { read_cr4() })?;
         Ok(GuestMappings { code, stack })
     }
 }
@@ -178,5 +203,55 @@ mod tests {
     #[test]
     fn guest_code_fits_in_one_page() {
         assert!(guest_code().len() <= PAGE_SIZE);
+    }
+
+    /// A supervisor, writable, executable 4 KiB page.
+    fn kernel_page() -> Mapping {
+        Mapping {
+            physical: 0x7eb1_9000,
+            size: paging::PageSize::Size4K,
+            writable: true,
+            user: false,
+            execute_disable: false,
+        }
+    }
+
+    const SMEP_AND_SMAP: u64 = paging::CR4_SMEP | paging::CR4_SMAP;
+
+    #[test]
+    fn kernel_pages_pass_even_with_smep_and_smap() {
+        assert_eq!(check_permissions(&kernel_page(), &kernel_page(), SMEP_AND_SMAP), Ok(()));
+    }
+
+    #[test]
+    fn code_with_xd_is_refused() {
+        let code = Mapping { execute_disable: true, ..kernel_page() };
+        assert_eq!(check_permissions(&code, &kernel_page(), 0), Err(GuestMemoryError::CodeNotExecutable));
+    }
+
+    #[test]
+    fn user_code_is_refused_only_under_smep() {
+        let code = Mapping { user: true, ..kernel_page() };
+        assert_eq!(check_permissions(&code, &kernel_page(), 0), Ok(()));
+        assert_eq!(
+            check_permissions(&code, &kernel_page(), paging::CR4_SMEP),
+            Err(GuestMemoryError::CodeBlockedBySmep),
+        );
+    }
+
+    #[test]
+    fn read_only_stack_is_refused() {
+        let stack = Mapping { writable: false, ..kernel_page() };
+        assert_eq!(check_permissions(&kernel_page(), &stack, 0), Err(GuestMemoryError::StackNotWritable));
+    }
+
+    #[test]
+    fn user_stack_is_refused_only_under_smap() {
+        let stack = Mapping { user: true, ..kernel_page() };
+        assert_eq!(check_permissions(&kernel_page(), &stack, 0), Ok(()));
+        assert_eq!(
+            check_permissions(&kernel_page(), &stack, paging::CR4_SMAP),
+            Err(GuestMemoryError::StackBlockedBySmap),
+        );
     }
 }

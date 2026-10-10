@@ -263,16 +263,20 @@ fn report_guest_mappings(guest: &GuestMemory, mappings: &GuestMappings) {
         ("stack", stack_base, mappings.stack),
     ] {
         log!(
-            "Guest {name} page: virt={virtual_address:#018x} phys={:#018x} identity={} size={:?} writable={} xd={}",
+            "Guest {name} page: virt={virtual_address:#018x} phys={:#018x} identity={} size={:?} writable={} user={} xd={}",
             mapping.physical, mapping.physical == virtual_address, mapping.size,
-            mapping.writable, mapping.execute_disable,
+            mapping.writable, mapping.user, mapping.execute_disable,
         );
     }
 
     // The guest shares these tables, so a guest EFER.NXE that differs from
     // the host's would turn any XD bit in them into a reserved-bit fault.
     let nxe = unsafe { vmx::msr::rdmsr(vmx::msr::IA32_EFER) } & vmx::paging::EFER_NXE != 0;
-    log!("Guest code page executable and stack page writable; host EFER.NXE={nxe}.");
+    let cr4 = unsafe { vmx::cr::read_cr4() };
+    log!(
+        "Guest code page executable and stack page writable; host EFER.NXE={nxe} CR4.SMEP={} CR4.SMAP={}.",
+        cr4 & vmx::paging::CR4_SMEP != 0, cr4 & vmx::paging::CR4_SMAP != 0,
+    );
 }
 
 /// Confirms that VMXON, the VMCS work, and UEFI calls left the host GDTR,

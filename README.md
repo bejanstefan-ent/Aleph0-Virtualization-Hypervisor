@@ -54,11 +54,15 @@ diagnostics that run before VMXON.
 
 | Path | Purpose |
 | --- | --- |
-| `src/main.rs` | UEFI entry point; drives the bring-up sequence |
+| `src/main.rs` | UEFI entry point and the `log!` macro |
+| `src/bring_up/` | The bring-up sequence (`mod.rs`), its errors (`error.rs`) and status lines (`report.rs`) |
+| `src/output.rs` | Output phases and the firmware-free panic handler |
 | `src/serial.rs` | COM1 serial logger usable without firmware |
 | `src/vmx/cpuid.rs`, `msr.rs`, `cr.rs` | CPU feature, MSR and control-register access |
 | `src/vmx/host_tables.rs`, `segment.rs` | Host GDT/TSS setup and segmentation state |
 | `src/vmx/vmxon.rs` | Entering VMX root operation |
+| `src/vmx/guest.rs`, `paging.rs` | Guest code and stack pages; the page-table walk that checks them |
+| `src/vmx/guest_state.rs` | Guest-state VMCS fields, copied from the host CPU |
 | `src/vmx/vmcs/mod.rs`, `fields.rs` | VMCS lifecycle, field access, controls and host state; every field encoding |
 | `src/vmx/vmexit.rs` | VM-exit stack, entry stub and exit diagnostic |
 | `run-hyperv.ps1`, `read-serial.ps1` | Hyper-V test VM runner and serial reader |

@@ -124,4 +124,4 @@ At the virtual-device milestone (section 5):
 - Run `run-hyperv.ps1` from an elevated PowerShell session and inspect the VM console and the serial stream in the PowerShell window (also saved to `run\serial.log`). The runner turns off the named test VM and recreates its ESP VHDX; do not keep irreplaceable data there. VM-exit diagnostics appear only on serial.
 - Record observed VMX instruction errors and VM-exit reasons as milestones are reached. QEMU without nested VMX can still test non-VMX diagnostics, but cannot validate `VMLAUNCH`.
 
-Relevant code: `src/main.rs`, `src/serial.rs`, `src/output.rs`, `src/vmx/segment.rs`, `src/vmx/vmxon.rs`, `src/vmx/vmcs.rs`, `src/vmx/vmexit.rs`, `src/vmx/guest.rs`, `src/vmx/paging.rs`, `src/vmx/guest_state.rs`, `run-hyperv.ps1`, and `read-serial.ps1`.
+Relevant code: `src/main.rs`, `src/bring_up/`, `src/serial.rs`, `src/output.rs`, `src/vmx/segment.rs`, `src/vmx/vmxon.rs`, `src/vmx/vmcs/`, `src/vmx/vmexit.rs`, `src/vmx/guest.rs`, `src/vmx/paging.rs`, `src/vmx/guest_state.rs`, `run-hyperv.ps1`, and `read-serial.ps1`.

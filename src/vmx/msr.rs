@@ -1,4 +1,5 @@
-//! IA32_FEATURE_CONTROL MSR checks gating VMX enablement.
+//! Model-specific registers (MSRs): their addresses, the bits this
+//! hypervisor reads in them, and RDMSR/WRMSR.
 use core::arch::asm;
 
 /// MSR address of IA32_FEATURE_CONTROL.
@@ -18,6 +19,16 @@ pub const IA32_SYSENTER_EIP: u32 = 0x176;
 /// Page attribute table and extended feature enable register.
 pub const IA32_PAT: u32 = 0x277;
 pub const IA32_EFER: u32 = 0xC000_0080;
+
+/// IA32_EFER bit 11 (NXE): no-execute enable. While clear, the XD bit in a
+/// page-table entry is reserved, not a permission.
+pub const EFER_NXE: u64 = 1 << 11;
+
+/// MSRs holding the FS and GS segment bases. Unlike the selectors, these are
+/// live in long mode: operating systems use FS/GS for per-thread and per-CPU
+/// data.
+pub const IA32_FS_BASE: u32 = 0xC000_0100;
+pub const IA32_GS_BASE: u32 = 0xC000_0101;
 
 pub unsafe fn read_feature_control() -> u64 {
     unsafe {

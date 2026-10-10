@@ -16,7 +16,7 @@ use core::ptr::NonNull;
 
 use uefi::boot::MemoryType;
 
-use super::cr::read_cr4;
+use super::cr::{self, read_cr4};
 use super::page::{allocate_zeroed_pages_of_type, PAGE_SIZE};
 use super::paging::{self, Mapping, WalkError};
 
@@ -89,13 +89,13 @@ fn check_permissions(code: &Mapping, stack: &Mapping, cr4: u64) -> Result<(), Gu
     if code.execute_disable {
         return Err(GuestMemoryError::CodeNotExecutable);
     }
-    if code.user && cr4 & paging::CR4_SMEP != 0 {
+    if code.user && cr4 & cr::CR4_SMEP != 0 {
         return Err(GuestMemoryError::CodeBlockedBySmep);
     }
     if !stack.writable {
         return Err(GuestMemoryError::StackNotWritable);
     }
-    if stack.user && cr4 & paging::CR4_SMAP != 0 {
+    if stack.user && cr4 & cr::CR4_SMAP != 0 {
         return Err(GuestMemoryError::StackBlockedBySmap);
     }
     Ok(())
@@ -216,7 +216,7 @@ mod tests {
         }
     }
 
-    const SMEP_AND_SMAP: u64 = paging::CR4_SMEP | paging::CR4_SMAP;
+    const SMEP_AND_SMAP: u64 = cr::CR4_SMEP | cr::CR4_SMAP;
 
     #[test]
     fn kernel_pages_pass_even_with_smep_and_smap() {
@@ -234,7 +234,7 @@ mod tests {
         let code = Mapping { user: true, ..kernel_page() };
         assert_eq!(check_permissions(&code, &kernel_page(), 0), Ok(()));
         assert_eq!(
-            check_permissions(&code, &kernel_page(), paging::CR4_SMEP),
+            check_permissions(&code, &kernel_page(), cr::CR4_SMEP),
             Err(GuestMemoryError::CodeBlockedBySmep),
         );
     }
@@ -250,7 +250,7 @@ mod tests {
         let stack = Mapping { user: true, ..kernel_page() };
         assert_eq!(check_permissions(&kernel_page(), &stack, 0), Ok(()));
         assert_eq!(
-            check_permissions(&kernel_page(), &stack, paging::CR4_SMAP),
+            check_permissions(&kernel_page(), &stack, cr::CR4_SMAP),
             Err(GuestMemoryError::StackBlockedBySmap),
         );
     }

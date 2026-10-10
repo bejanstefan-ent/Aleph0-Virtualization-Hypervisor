@@ -7,8 +7,19 @@
 //! fields must describe the environment the host handler will run in.
 use core::arch::asm;
 
+/// CR4 bit 12 (LA57): 5-level paging. [`super::paging::walk`] only handles
+/// 4 levels.
+pub const CR4_LA57: u64 = 1 << 12;
+
 /// CR4 bit 13: VMX-enable. VMXON raises #UD while this is clear.
 pub const CR4_VMXE: u64 = 1 << 13;
+
+/// CR4 bit 20 (SMEP): ring 0 may not execute from user pages.
+pub const CR4_SMEP: u64 = 1 << 20;
+
+/// CR4 bit 21 (SMAP): ring 0 may not read or write user pages while
+/// RFLAGS.AC = 0.
+pub const CR4_SMAP: u64 = 1 << 21;
 
 /// Reads CR0.
 pub unsafe fn read_cr0() -> u64 {

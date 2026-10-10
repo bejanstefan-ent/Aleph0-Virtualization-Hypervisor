@@ -26,12 +26,6 @@
 use core::{arch::asm, ptr::read_volatile};
 use super::msr;
 
-/// MSR holding the FS segment base. Unlike the selector, this is live in
-/// long mode: operating systems use FS/GS for per-thread and per-CPU data.
-pub const IA32_FS_BASE: u32 = 0xC000_0100;
-/// MSR holding the GS segment base.
-pub const IA32_GS_BASE: u32 = 0xC000_0101;
-
 /// Contents of GDTR or IDTR: where a descriptor table starts and how big it is.
 #[derive(Debug, Clone, Copy)]
 pub struct DescriptorTable {
@@ -188,14 +182,14 @@ pub unsafe fn read_tr() -> u16 {
     selector
 }
 
-/// Reads the FS base from [`IA32_FS_BASE`].
+/// Reads the FS base from [`msr::IA32_FS_BASE`].
 pub unsafe fn read_fs_base() -> u64 {
-    unsafe { msr::rdmsr(IA32_FS_BASE) }
+    unsafe { msr::rdmsr(msr::IA32_FS_BASE) }
 }
 
-/// Reads the GS base from [`IA32_GS_BASE`].
+/// Reads the GS base from [`msr::IA32_GS_BASE`].
 pub unsafe fn read_gs_base() -> u64 {
-    unsafe { msr::rdmsr(IA32_GS_BASE) }
+    unsafe { msr::rdmsr(msr::IA32_GS_BASE) }
 }
 
 /// Extracts a segment's base address from its GDT descriptor.

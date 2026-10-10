@@ -172,21 +172,7 @@
 //! `0x7ea00000 | (0x7eb19000 & 0x1FFFFF)` = the same `0x7eb19000`. The PT
 //! index bits simply become part of the offset.
 
-use super::cr::{read_cr3, read_cr4};
-
-/// CR4 bit 12: 5-level paging. [`walk`] only handles 4 levels.
-pub const CR4_LA57: u64 = 1 << 12;
-
-/// CR4 bit 20: SMEP. Ring 0 may not execute from user pages.
-pub const CR4_SMEP: u64 = 1 << 20;
-
-/// CR4 bit 21: SMAP. Ring 0 may not read or write user pages while
-/// RFLAGS.AC = 0.
-pub const CR4_SMAP: u64 = 1 << 21;
-
-/// IA32_EFER bit 11: no-execute enable. While clear, the XD bit in a
-/// page-table entry is reserved, not a permission.
-pub const EFER_NXE: u64 = 1 << 11;
+use super::cr::{read_cr3, read_cr4, CR4_LA57};
 
 // Entry bits used by the walk; the full layout is in the module docs.
 

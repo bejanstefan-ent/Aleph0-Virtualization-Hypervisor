@@ -37,7 +37,7 @@
 use super::cr;
 use super::msr;
 use super::segment::{self, ACCESS_RIGHTS_UNUSABLE, DescriptorTable};
-use super::vmcs::{self, VmcsError};
+use super::vmcs::{self, fields, VmcsError};
 
 /// RFLAGS bit 1 is reserved and must be 1; every other bit is 0.
 const INITIAL_RFLAGS: u64 = 0x2;
@@ -147,8 +147,8 @@ impl GuestState {
     pub unsafe fn from_current(rip: u64, rsp: u64) -> Result<Self, GuestStateError> {
         let host = unsafe { segment::read_all() };
         let gdt = &host.gdtr;
-        let entry_controls = unsafe { vmcs::vmread(vmcs::VM_ENTRY_CONTROLS) }
-            .map_err(|error| GuestStateError::Vmcs { field: vmcs::VM_ENTRY_CONTROLS, error })?;
+        let entry_controls = unsafe { vmcs::vmread(fields::VM_ENTRY_CONTROLS) }
+            .map_err(|error| GuestStateError::Vmcs { field: fields::VM_ENTRY_CONTROLS, error })?;
 
         let state = unsafe {
             Self {
@@ -171,9 +171,9 @@ impl GuestState {
                 sysenter_cs: u64::from(msr::rdmsr(msr::IA32_SYSENTER_CS) as u32),
                 sysenter_esp: msr::rdmsr(msr::IA32_SYSENTER_ESP),
                 sysenter_eip: msr::rdmsr(msr::IA32_SYSENTER_EIP),
-                pat: (entry_controls & vmcs::VM_ENTRY_LOAD_IA32_PAT != 0)
+                pat: (entry_controls & fields::VM_ENTRY_LOAD_IA32_PAT != 0)
                     .then(|| msr::rdmsr(msr::IA32_PAT)),
-                efer: (entry_controls & vmcs::VM_ENTRY_LOAD_IA32_EFER != 0)
+                efer: (entry_controls & fields::VM_ENTRY_LOAD_IA32_EFER != 0)
                     .then(|| msr::rdmsr(msr::IA32_EFER)),
             }
         };
@@ -189,7 +189,7 @@ impl GuestState {
     ///
     /// VMX operation must be active and a VMCS current on this CPU.
     pub unsafe fn write(&self) -> Result<(), GuestStateError> {
-        use vmcs::*;
+        use fields::*;
 
         let segments = [
             (self.es, GUEST_ES_SELECTOR, GUEST_ES_BASE, GUEST_ES_LIMIT, GUEST_ES_ACCESS_RIGHTS),

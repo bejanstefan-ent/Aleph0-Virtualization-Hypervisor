@@ -59,7 +59,7 @@ diagnostics that run before VMXON.
 | `src/vmx/cpuid.rs`, `msr.rs`, `cr.rs` | CPU feature, MSR and control-register access |
 | `src/vmx/host_tables.rs`, `segment.rs` | Host GDT/TSS setup and segmentation state |
 | `src/vmx/vmxon.rs` | Entering VMX root operation |
-| `src/vmx/vmcs.rs` | VMCS lifecycle, field access, controls and host state |
+| `src/vmx/vmcs/mod.rs`, `fields.rs` | VMCS lifecycle, field access, controls and host state; every field encoding |
 | `src/vmx/vmexit.rs` | VM-exit stack, entry stub and exit diagnostic |
 | `run-hyperv.ps1`, `read-serial.ps1` | Hyper-V test VM runner and serial reader |
 | `docs/` | Background explanations: [SERIAL_LOGGING.md](docs/SERIAL_LOGGING.md) (serial logger, beginner walkthrough), [PORT_IO.md](docs/PORT_IO.md) (`in`/`out` and the I/O port space) |

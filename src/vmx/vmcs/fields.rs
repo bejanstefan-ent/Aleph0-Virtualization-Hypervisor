@@ -1,0 +1,183 @@
+//! VMCS field encodings, and the bits inside the control fields.
+//!
+//! [`super::vmread`] and [`super::vmwrite`] name a field by a 32-bit
+//! *encoding*, not by an offset into the VMCS region (whose layout is
+//! undocumented). The encoding packs what kind of field it is:
+//!
+//! ```text
+//!  14  13  12  11  10  9            1   0
+//! ┌───────┬───┬───────┬──────────────┬──────┐
+//! │ width │ 0 │ type  │    index     │access│
+//! └───────┴───┴───────┴──────────────┴──────┘
+//! ```
+//!
+//! - width: 0 = 16-bit, 1 = 64-bit, 2 = 32-bit, 3 = natural (64-bit here)
+//! - type: 0 = control, 1 = read-only data, 2 = guest state, 3 = host state
+//! - access: 0 = the full field, 1 = the high 32 bits of a 64-bit field
+//!
+//! So the leading hex digits already say what a field is: `0x08xx` is a
+//! 16-bit guest field, `0x6Cxx` a natural-width host field.
+
+// ── Control fields (32-bit) ──────────────────────────────────────────────
+
+/// Pin-based VM-execution controls.
+pub const PIN_BASED_VM_EXEC_CONTROL: u32 = 0x4000;
+/// Primary processor-based VM-execution controls.
+pub const PRIMARY_VM_EXEC_CONTROL: u32 = 0x4002;
+/// VM-exit controls.
+pub const VM_EXIT_CONTROLS: u32 = 0x400C;
+/// VM-entry controls.
+pub const VM_ENTRY_CONTROLS: u32 = 0x4012;
+
+// ── Bits inside the control fields ───────────────────────────────────────
+
+/// VM-exit control bit 9: the host runs in 64-bit mode after a VM exit.
+pub const VM_EXIT_HOST_ADDRESS_SPACE_SIZE: u32 = 1 << 9;
+/// VM-exit control bits that load host PAT and EFER from the VMCS.
+pub const VM_EXIT_LOAD_IA32_PAT: u64 = 1 << 19;
+pub const VM_EXIT_LOAD_IA32_EFER: u64 = 1 << 21;
+/// VM-entry control bit 9: the guest starts in IA-32e (64-bit) mode.
+pub const VM_ENTRY_IA32E_MODE_GUEST: u32 = 1 << 9;
+/// VM-entry control bits that load guest PAT and EFER from the VMCS. When a
+/// bit is 0, the guest keeps the value the CPU already has, and the matching
+/// guest field may not even exist.
+pub const VM_ENTRY_LOAD_IA32_PAT: u64 = 1 << 14;
+pub const VM_ENTRY_LOAD_IA32_EFER: u64 = 1 << 15;
+
+// ── Read-only data fields ────────────────────────────────────────────────
+
+/// Why the last VMX instruction failed (32-bit; valid after VMfailValid).
+pub const VM_INSTRUCTION_ERROR: u32 = 0x4400;
+/// Why the last VM exit happened (32-bit).
+pub const VM_EXIT_REASON: u32 = 0x4402;
+/// Length in bytes of the instruction that caused the exit (32-bit), for
+/// exits caused by an instruction (VMCALL, CPUID, ...). Used to advance RIP.
+pub const VM_EXIT_INSTRUCTION_LEN: u32 = 0x440C;
+/// Extra exit detail whose meaning depends on the exit reason (natural
+/// width), e.g. the faulting address for an EPT violation.
+pub const EXIT_QUALIFICATION: u32 = 0x6400;
+
+// ── Guest-state fields ───────────────────────────────────────────────────
+
+/// Guest segment selectors (16-bit).
+pub const GUEST_ES_SELECTOR: u32 = 0x0800;
+pub const GUEST_CS_SELECTOR: u32 = 0x0802;
+pub const GUEST_SS_SELECTOR: u32 = 0x0804;
+pub const GUEST_DS_SELECTOR: u32 = 0x0806;
+pub const GUEST_FS_SELECTOR: u32 = 0x0808;
+pub const GUEST_GS_SELECTOR: u32 = 0x080A;
+pub const GUEST_LDTR_SELECTOR: u32 = 0x080C;
+pub const GUEST_TR_SELECTOR: u32 = 0x080E;
+
+/// Must be set to `!0` unless shadow VMCS is in use (64-bit). A classic
+/// omission: leaving it zero makes VM entry fail with an invalid-guest-state
+/// exit.
+pub const VMCS_LINK_POINTER: u32 = 0x2800;
+
+/// Guest IA32_DEBUGCTL, PAT and EFER (64-bit). PAT and EFER exist only on
+/// CPUs that support the matching VM-entry load controls.
+pub const GUEST_IA32_DEBUGCTL: u32 = 0x2802;
+pub const GUEST_IA32_PAT: u32 = 0x2804;
+pub const GUEST_IA32_EFER: u32 = 0x2806;
+
+/// Guest segment limits (32-bit).
+pub const GUEST_ES_LIMIT: u32 = 0x4800;
+pub const GUEST_CS_LIMIT: u32 = 0x4802;
+pub const GUEST_SS_LIMIT: u32 = 0x4804;
+pub const GUEST_DS_LIMIT: u32 = 0x4806;
+pub const GUEST_FS_LIMIT: u32 = 0x4808;
+pub const GUEST_GS_LIMIT: u32 = 0x480A;
+pub const GUEST_LDTR_LIMIT: u32 = 0x480C;
+pub const GUEST_TR_LIMIT: u32 = 0x480E;
+pub const GUEST_GDTR_LIMIT: u32 = 0x4810;
+pub const GUEST_IDTR_LIMIT: u32 = 0x4812;
+
+/// Guest segment access rights (32-bit), in the format of
+/// [`crate::vmx::segment::descriptor_access_rights`].
+pub const GUEST_ES_ACCESS_RIGHTS: u32 = 0x4814;
+pub const GUEST_CS_ACCESS_RIGHTS: u32 = 0x4816;
+pub const GUEST_SS_ACCESS_RIGHTS: u32 = 0x4818;
+pub const GUEST_DS_ACCESS_RIGHTS: u32 = 0x481A;
+pub const GUEST_FS_ACCESS_RIGHTS: u32 = 0x481C;
+pub const GUEST_GS_ACCESS_RIGHTS: u32 = 0x481E;
+pub const GUEST_LDTR_ACCESS_RIGHTS: u32 = 0x4820;
+pub const GUEST_TR_ACCESS_RIGHTS: u32 = 0x4822;
+
+/// Guest interruptibility state (32-bit): 0 = no blocking by STI, MOV SS,
+/// SMI or NMI.
+pub const GUEST_INTERRUPTIBILITY_STATE: u32 = 0x4824;
+/// Guest activity state (32-bit): 0 = active, as opposed to HLT, shutdown
+/// or wait-for-SIPI.
+pub const GUEST_ACTIVITY_STATE: u32 = 0x4826;
+/// Guest SYSENTER code selector (32-bit).
+pub const GUEST_IA32_SYSENTER_CS: u32 = 0x482A;
+
+/// Guest control registers (natural width).
+pub const GUEST_CR0: u32 = 0x6800;
+pub const GUEST_CR3: u32 = 0x6802;
+pub const GUEST_CR4: u32 = 0x6804;
+
+/// Guest segment and descriptor-table bases (natural width).
+pub const GUEST_ES_BASE: u32 = 0x6806;
+pub const GUEST_CS_BASE: u32 = 0x6808;
+pub const GUEST_SS_BASE: u32 = 0x680A;
+pub const GUEST_DS_BASE: u32 = 0x680C;
+pub const GUEST_FS_BASE: u32 = 0x680E;
+pub const GUEST_GS_BASE: u32 = 0x6810;
+pub const GUEST_LDTR_BASE: u32 = 0x6812;
+pub const GUEST_TR_BASE: u32 = 0x6814;
+pub const GUEST_GDTR_BASE: u32 = 0x6816;
+pub const GUEST_IDTR_BASE: u32 = 0x6818;
+
+/// Guest DR7 (natural width), loaded when "load debug controls" is set.
+pub const GUEST_DR7: u32 = 0x681A;
+/// Guest RSP (natural width).
+pub const GUEST_RSP: u32 = 0x681C;
+/// Guest RIP (natural width).
+pub const GUEST_RIP: u32 = 0x681E;
+/// Guest RFLAGS (natural width).
+pub const GUEST_RFLAGS: u32 = 0x6820;
+/// Guest pending debug exceptions (natural width): 0 = none pending.
+pub const GUEST_PENDING_DEBUG_EXCEPTIONS: u32 = 0x6822;
+/// Guest SYSENTER stack and entry addresses (natural width).
+pub const GUEST_IA32_SYSENTER_ESP: u32 = 0x6824;
+pub const GUEST_IA32_SYSENTER_EIP: u32 = 0x6826;
+
+// ── Host-state fields ────────────────────────────────────────────────────
+
+/// Host segment selectors (16-bit).
+pub const HOST_ES_SELECTOR: u32 = 0x0C00;
+pub const HOST_CS_SELECTOR: u32 = 0x0C02;
+pub const HOST_SS_SELECTOR: u32 = 0x0C04;
+pub const HOST_DS_SELECTOR: u32 = 0x0C06;
+pub const HOST_FS_SELECTOR: u32 = 0x0C08;
+pub const HOST_GS_SELECTOR: u32 = 0x0C0A;
+pub const HOST_TR_SELECTOR: u32 = 0x0C0C;
+
+/// Host PAT and EFER (64-bit, loaded when selected on VM exit).
+pub const HOST_IA32_PAT: u32 = 0x2C00;
+pub const HOST_IA32_EFER: u32 = 0x2C02;
+
+/// Host SYSENTER code selector (32-bit).
+pub const HOST_IA32_SYSENTER_CS: u32 = 0x4C00;
+
+/// Host control registers (natural width).
+pub const HOST_CR0: u32 = 0x6C00;
+pub const HOST_CR3: u32 = 0x6C02;
+pub const HOST_CR4: u32 = 0x6C04;
+
+/// Host segment and descriptor-table bases (natural width).
+pub const HOST_FS_BASE: u32 = 0x6C06;
+pub const HOST_GS_BASE: u32 = 0x6C08;
+pub const HOST_TR_BASE: u32 = 0x6C0A;
+pub const HOST_GDTR_BASE: u32 = 0x6C0C;
+pub const HOST_IDTR_BASE: u32 = 0x6C0E;
+
+/// Host SYSENTER stack and entry addresses (natural width).
+pub const HOST_IA32_SYSENTER_ESP: u32 = 0x6C10;
+pub const HOST_IA32_SYSENTER_EIP: u32 = 0x6C12;
+
+/// Host RSP: the stack the CPU switches to on every VM exit.
+pub const HOST_RSP: u32 = 0x6C14;
+/// Host RIP: the exit handler the CPU jumps to on every VM exit.
+pub const HOST_RIP: u32 = 0x6C16;

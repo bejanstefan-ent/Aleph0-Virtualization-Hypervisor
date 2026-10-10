@@ -16,6 +16,7 @@ use crate::output::halt_forever;
 
 use super::page::{allocate_zeroed_pages, PAGE_SIZE};
 use super::vmcs::{self, VmcsError};
+use super::vmcs::fields::{EXIT_QUALIFICATION, GUEST_RIP, VM_EXIT_INSTRUCTION_LEN, VM_EXIT_REASON};
 
 pub const VM_EXIT_STACK_PAGES: usize = 4;
 pub const VM_EXIT_STACK_SIZE: usize = VM_EXIT_STACK_PAGES * PAGE_SIZE;
@@ -172,7 +173,7 @@ extern "efiapi" fn vmexit_handler(frame: *const RegisterFrame) -> ! {
 
     let tag = crate::TAG;
 
-    if let Some(raw) = read_or_report("VM_EXIT_REASON", vmcs::VM_EXIT_REASON) {
+    if let Some(raw) = read_or_report("VM_EXIT_REASON", VM_EXIT_REASON) {
         let reason = ExitReason::from_raw(raw as u32);
         crate::serial_println!(
             "{tag} VM exit: reason={} ({}){}",
@@ -181,12 +182,12 @@ extern "efiapi" fn vmexit_handler(frame: *const RegisterFrame) -> ! {
             if reason.entry_failure { " [VM entry failed; guest did not run]" } else { "" },
         );
     }
-    if let Some(qualification) = read_or_report("EXIT_QUALIFICATION", vmcs::EXIT_QUALIFICATION) {
+    if let Some(qualification) = read_or_report("EXIT_QUALIFICATION", EXIT_QUALIFICATION) {
         crate::serial_println!("{tag} VM exit: qualification={qualification:#018x}");
     }
     if let (Some(rip), Some(length)) = (
-        read_or_report("GUEST_RIP", vmcs::GUEST_RIP),
-        read_or_report("VM_EXIT_INSTRUCTION_LEN", vmcs::VM_EXIT_INSTRUCTION_LEN),
+        read_or_report("GUEST_RIP", GUEST_RIP),
+        read_or_report("VM_EXIT_INSTRUCTION_LEN", VM_EXIT_INSTRUCTION_LEN),
     ) {
         crate::serial_println!("{tag} VM exit: guest rip={rip:#018x} instruction length={length}");
     }

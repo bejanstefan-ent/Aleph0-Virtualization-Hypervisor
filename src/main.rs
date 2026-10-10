@@ -250,12 +250,12 @@ fn bring_up_vmx(
     log!("VMCS controls written and read back successfully.");
 
     unsafe { vmx::vmcs::configure_host_state() }.map_err(vmcs_step("host-state setup"))?;
-    let exit_controls = unsafe { vmx::vmcs::vmread(vmx::vmcs::VM_EXIT_CONTROLS) }
+    let exit_controls = unsafe { vmx::vmcs::vmread(vmx::vmcs::fields::VM_EXIT_CONTROLS) }
         .map_err(vmcs_step("exit-control readback"))?;
     log!(
         "VMCS host fields written and read back; host PAT load={} EFER load={}; VM entry not attempted.",
-        exit_controls & vmx::vmcs::VM_EXIT_LOAD_IA32_PAT != 0,
-        exit_controls & vmx::vmcs::VM_EXIT_LOAD_IA32_EFER != 0,
+        exit_controls & vmx::vmcs::fields::VM_EXIT_LOAD_IA32_PAT != 0,
+        exit_controls & vmx::vmcs::fields::VM_EXIT_LOAD_IA32_EFER != 0,
     );
 
     unsafe { vmx::vmcs::configure_host_entry(vmexit_stack.top(), vmx::vmexit::entry_address()) }
